@@ -22,7 +22,7 @@ const db = new Pool({
 // ==========================================
 const seedDatabase = async () => {
   try {
-    // 1. Ensure table exists
+    // 1. Ensure staff table exists
     await db.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -32,7 +32,17 @@ const seedDatabase = async () => {
       );
     `);
     
-    // 2. PATCH: Force the database to add the missing column if it doesn't exist
+    // 2. CREATE UNIVERSAL SYNC TABLE FOR HYBRID CLOUD APP
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS sync_data (
+        id VARCHAR(100) PRIMARY KEY,
+        collection VARCHAR(50) NOT NULL,
+        payload JSONB NOT NULL,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 3. PATCH: Force the database to add the missing column if it doesn't exist
     await db.query(`
       ALTER TABLE users 
       ADD COLUMN IF NOT EXISTS reset_requested BOOLEAN DEFAULT false;
@@ -40,7 +50,7 @@ const seedDatabase = async () => {
     
     console.log("--> Database tables verified and patched.");
 
-    // 3. Verify Admin account
+    // 4. Verify Admin account
     const adminCheck = await db.query("SELECT * FROM users WHERE LOWER(username) = 'admin'");
     
     if (adminCheck.rowCount === 0) {
@@ -60,6 +70,7 @@ const seedDatabase = async () => {
 
 // Run seed script on server start
 seedDatabase();
+
 // ==========================================
 // LOGIN AUTHENTICATION ROUTE
 // ==========================================
@@ -252,6 +263,69 @@ app.post('/api/staff/admin-reset-password', async (req, res) => {
   } catch (err) {
     console.error("Admin reset error:", err);
     res.status(500).json({ error: "Database error during admin password reset." });
+  }
+});
+
+// ==========================================
+// UNIVERSAL CLOUD SYNC ROUTES (Hybrid Local/Cloud)
+// ==========================================
+const validCollections = ['patients', 'appointments', 'prescriptions', 'inventory', 'lab-orders', 'lab-reports', 'invoices'];
+
+// 1. PULL: Send all cloud data to the local Electron app on startup
+app.get('/api/:collection', async (req, res, next) => {
+  const { collection } = req.params;
+  if (!validCollections.includes(collection)) return next();
+
+  try {
+    const result = await db.query('SELECT payload FROM sync_data WHERE collection = $1', [collection]);
+    const data = result.rows.map(row => row.payload);
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error(`Error pulling ${collection}:`, err);
+    res.status(500).json({ success: false, error: 'Database fetch failed' });
+  }
+});
+
+// 2. PUSH (New): Insert a new record into the cloud
+app.post('/api/:collection', async (req, res, next) => {
+  const { collection } = req.params;
+  if (!validCollections.includes(collection)) return next();
+
+  const payload = req.body;
+  if (!payload || !payload.id) return res.status(400).json({ error: 'Missing payload or ID' });
+
+  try {
+    await db.query(`
+      INSERT INTO sync_data (id, collection, payload, last_updated)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      ON CONFLICT (id) 
+      DO UPDATE SET payload = EXCLUDED.payload, last_updated = CURRENT_TIMESTAMP;
+    `, [payload.id, collection, payload]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error(`Error pushing ${collection}:`, err);
+    res.status(500).json({ success: false });
+  }
+});
+
+// 3. PUSH (Update): Update an existing record in the cloud
+app.put('/api/:collection/:id', async (req, res, next) => {
+  const { collection, id } = req.params;
+  if (!validCollections.includes(collection)) return next();
+
+  const payload = req.body;
+  try {
+    await db.query(`
+      INSERT INTO sync_data (id, collection, payload, last_updated)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      ON CONFLICT (id) 
+      DO UPDATE SET payload = EXCLUDED.payload, last_updated = CURRENT_TIMESTAMP;
+    `, [id, collection, payload]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false });
   }
 });
 
