@@ -1,4 +1,6 @@
 require('dotenv').config();
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'carepoint_super_secret_key_2026';
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -22,7 +24,7 @@ const db = new Pool({
 // ==========================================
 const seedDatabase = async () => {
   try {
-    // 1. Ensure staff table exists
+    // 1. Ensure users table exists
     await db.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -42,10 +44,11 @@ const seedDatabase = async () => {
       );
     `);
 
-    // 3. PATCH: Force the database to add the missing column if it doesn't exist
+    // 3. PATCH: Force the database to add missing columns if they don't exist
     await db.query(`
       ALTER TABLE users 
-      ADD COLUMN IF NOT EXISTS reset_requested BOOLEAN DEFAULT false;
+      ADD COLUMN IF NOT EXISTS reset_requested BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP;
     `);
     
     console.log("--> Database tables verified and patched.");
@@ -72,7 +75,7 @@ const seedDatabase = async () => {
 seedDatabase();
 
 // ==========================================
-// LOGIN AUTHENTICATION ROUTE
+// LOGIN AUTHENTICATION ROUTE (Updated with JWT)
 // ==========================================
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
@@ -91,7 +94,19 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (isMatch) {
       console.log(`--> SUCCESS: Logging in user: ${user.username}`);
-      res.json({ success: true, user: { id: user.id, username: user.username, role: user.role } });
+      
+      // STEP 3: Generate a secure JWT token when user logs in
+      const token = jwt.sign(
+        { id: user.id, username: user.username, role: user.role },
+        JWT_SECRET,
+        { expiresIn: '7d' } // Token expires in 7 days
+      );
+
+      res.json({ 
+        success: true, 
+        token: token, 
+        user: { id: user.id, username: user.username, role: user.role } 
+      });
     } else {
       res.status(401).json({ success: false, error: 'Invalid username or password.' });
     }
@@ -152,7 +167,7 @@ app.put('/api/staff/update', async (req, res) => {
     if (password && password.trim() !== '') {
       const hashedPassword = await bcrypt.hash(password, 10);
       await db.query(
-        `UPDATE users SET username = $1, password = $2, role = $3 WHERE LOWER(username) = $4`,
+        `UPDATE users SET username = $1, password = $2, role = $3, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $4`,
         [cleanNew, hashedPassword, role, cleanCurrent]
       );
     } else {
@@ -202,7 +217,12 @@ app.put('/api/staff/change-password', async (req, res) => {
     }
 
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-    await db.query('UPDATE users SET password = $1 WHERE LOWER(username) = $2', [hashedNewPassword, cleanUsername]);
+    
+    // STEP 2: Updates the password and logs the timestamp simultaneously
+    await db.query(
+      'UPDATE users SET password = $1, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $2', 
+      [hashedNewPassword, cleanUsername]
+    );
 
     res.json({ success: true });
   } catch (error) {
@@ -246,8 +266,9 @@ app.post('/api/staff/admin-reset-password', async (req, res) => {
     const tempPassword = `CarePoint${Math.floor(1000 + Math.random() * 9000)}`;
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
+    // Logs the timestamp when admin resets the password
     const result = await db.query(
-      "UPDATE users SET password = $1, reset_requested = false WHERE LOWER(username) = $2 RETURNING id",
+      "UPDATE users SET password = $1, reset_requested = false, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $2 RETURNING id",
       [hashedPassword, cleanUsername]
     );
 
@@ -267,12 +288,43 @@ app.post('/api/staff/admin-reset-password', async (req, res) => {
 });
 
 // ==========================================
-// UNIVERSAL CLOUD SYNC ROUTES (Hybrid Local/Cloud)
+// SECURITY MIDDLEWARE: VERIFY TOKEN & PASSWORD CHANGES
+// ==========================================
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader) return res.status(401).json({ error: 'Access denied. No token provided.', forceLogout: true });
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    
+    // Check if the user changed their password AFTER this token was issued
+    const userResult = await db.query('SELECT password_changed_at FROM users WHERE id = $1', [decoded.id]);
+    
+    if (userResult.rowCount > 0 && userResult.rows[0].password_changed_at) {
+      const passwordChangedTime = new Date(userResult.rows[0].password_changed_at).getTime() / 1000;
+      
+      // decoded.iat is the "Issued At" time of the token
+      if (decoded.iat < passwordChangedTime) {
+        return res.status(401).json({ error: 'Password was changed. Session expired.', forceLogout: true });
+      }
+    }
+
+    req.user = decoded; // Attach user info to the request
+    next(); // All good, proceed to the route!
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token.', forceLogout: true });
+  }
+};
+
+// ==========================================
+// UNIVERSAL CLOUD SYNC ROUTES (Protected)
 // ==========================================
 const validCollections = ['patients', 'appointments', 'prescriptions', 'inventory', 'lab-orders', 'lab-reports', 'invoices'];
 
 // 1. PULL: Send all cloud data to the local Electron app on startup
-app.get('/api/:collection', async (req, res, next) => {
+app.get('/api/:collection', verifyToken, async (req, res, next) => {
   const { collection } = req.params;
   if (!validCollections.includes(collection)) return next();
 
@@ -287,7 +339,7 @@ app.get('/api/:collection', async (req, res, next) => {
 });
 
 // 2. PUSH (New): Insert a new record into the cloud
-app.post('/api/:collection', async (req, res, next) => {
+app.post('/api/:collection', verifyToken, async (req, res, next) => {
   const { collection } = req.params;
   if (!validCollections.includes(collection)) return next();
 
@@ -310,7 +362,7 @@ app.post('/api/:collection', async (req, res, next) => {
 });
 
 // 3. PUSH (Update): Update an existing record in the cloud
-app.put('/api/:collection/:id', async (req, res, next) => {
+app.put('/api/:collection/:id', verifyToken, async (req, res, next) => {
   const { collection, id } = req.params;
   if (!validCollections.includes(collection)) return next();
 
