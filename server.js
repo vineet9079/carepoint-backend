@@ -24,7 +24,6 @@ const db = new Pool({
 // ==========================================
 const seedDatabase = async () => {
   try {
-    // 1. Ensure users table exists
     await db.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -34,7 +33,6 @@ const seedDatabase = async () => {
       );
     `);
     
-    // 2. CREATE UNIVERSAL SYNC TABLE FOR HYBRID CLOUD APP
     await db.query(`
       CREATE TABLE IF NOT EXISTS sync_data (
         id VARCHAR(100) PRIMARY KEY,
@@ -44,7 +42,6 @@ const seedDatabase = async () => {
       );
     `);
 
-    // 3. PATCH: Force the database to add missing columns if they don't exist
     await db.query(`
       ALTER TABLE users 
       ADD COLUMN IF NOT EXISTS reset_requested BOOLEAN DEFAULT false,
@@ -53,7 +50,6 @@ const seedDatabase = async () => {
     
     console.log("--> Database tables verified and patched.");
 
-    // 4. Verify Admin account
     const adminCheck = await db.query("SELECT * FROM users WHERE LOWER(username) = 'admin'");
     
     if (adminCheck.rowCount === 0) {
@@ -71,11 +67,10 @@ const seedDatabase = async () => {
   }
 };
 
-// Run seed script on server start
 seedDatabase();
 
 // ==========================================
-// LOGIN AUTHENTICATION ROUTE (Updated with JWT)
+// LOGIN AUTHENTICATION ROUTE
 // ==========================================
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
@@ -94,12 +89,10 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (isMatch) {
       console.log(`--> SUCCESS: Logging in user: ${user.username}`);
-      
-      // STEP 3: Generate a secure JWT token when user logs in
       const token = jwt.sign(
         { id: user.id, username: user.username, role: user.role },
         JWT_SECRET,
-        { expiresIn: '7d' } // Token expires in 7 days
+        { expiresIn: '7d' } 
       );
 
       res.json({ 
@@ -190,10 +183,79 @@ app.delete('/api/staff/:username', async (req, res) => {
   const usernameToDelete = req.params.username.trim().toLowerCase();
 
   try {
-    await db.query(`DELETE FROM users WHERE LOWER(username) = $1`, [usernameToDelete]); res.json({ success: true }); } catch (error) { console.error('Error deleting staff:', error); res.status(500).json({ error: 'Server error while deleting staff' }); } });  // ========================================== // CHANGE PASSWORD // ========================================== app.put('/api/staff/change-password', async (req, res) => { const { username, oldPassword, newPassword } = req.body; const cleanUsername = username ? username.trim().toLowerCase() : '';  try { const result = await db.query('SELECT * FROM users WHERE LOWER(username) = $1', [cleanUsername]); if (result.rowCount === 0) return res.status(404).json({ error: 'User not found.' });  const user = result.rows[0];  const isOldPasswordCorrect = await bcrypt.compare(oldPassword, user.password); if (!isOldPasswordCorrect) { return res.status(400).json({ error: 'Incorrect current password.' }); }  const hashedNewPassword = await bcrypt.hash(newPassword, 10);  // STEP 2: Updates the password and logs the timestamp simultaneously await db.query( 'UPDATE users SET password = $1, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $2', [hashedNewPassword, cleanUsername] );  res.json({ success: true }); } catch (error) { console.error('Password change error:', error); res.status(500).json({ error: 'Server error while changing password.' }); } });  // ========================================== // FORGOT PASSWORD: REQUEST RESET // ========================================== app.post('/api/auth/request-reset', async (req, res) => { const { username } = req.body; const cleanUsername = username ? username.trim().toLowerCase() : '';  try { const result = await db.query( "UPDATE users SET reset_requested = true WHERE LOWER(username) = $1 RETURNING id", [cleanUsername] );  if (result.rowCount === 0) { return res.status(404).json({ success: false, error: "User not found." }); }  res.json({ success: true, message: "Reset request sent to admin." }); } catch (err) { console.error("Reset request error:", err); res.status(500).json({ success: false, error: "Server error during password reset request." }); } });  // ========================================== // ADMIN APPROVE & RESET PASSWORD // ========================================== app.post('/api/staff/admin-reset-password', async (req, res) => { const { username } = req.body; const cleanUsername = username ? username.trim().toLowerCase() : '';  try { const tempPassword = `CarePoint${Math.floor(1000 + Math.random() * 9000)}`;
+    await db.query(`DELETE FROM users WHERE LOWER(username) = $1`, [usernameToDelete]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting staff:', error);
+    res.status(500).json({ error: 'Server error while deleting staff' });
+  }
+});
+
+// ==========================================
+// CHANGE PASSWORD
+// ==========================================
+app.put('/api/staff/change-password', async (req, res) => {
+  const { username, oldPassword, newPassword } = req.body;
+  const cleanUsername = username ? username.trim().toLowerCase() : '';
+
+  try {
+    const result = await db.query('SELECT * FROM users WHERE LOWER(username) = $1', [cleanUsername]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'User not found.' });
+    
+    const user = result.rows[0];
+    const isOldPasswordCorrect = await bcrypt.compare(oldPassword, user.password);
+    if (!isOldPasswordCorrect) {
+      return res.status(400).json({ error: 'Incorrect current password.' });
+    }
+
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+    await db.query(
+      'UPDATE users SET password = $1, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $2', 
+      [hashedNewPassword, cleanUsername]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Password change error:', error);
+    res.status(500).json({ error: 'Server error while changing password.' });
+  }
+});
+
+// ==========================================
+// FORGOT PASSWORD: REQUEST RESET
+// ==========================================
+app.post('/api/auth/request-reset', async (req, res) => {
+  const { username } = req.body;
+  const cleanUsername = username ? username.trim().toLowerCase() : '';
+
+  try {
+    const result = await db.query(
+      "UPDATE users SET reset_requested = true WHERE LOWER(username) = $1 RETURNING id",
+      [cleanUsername]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: "User not found." });
+    }
+
+    res.json({ success: true, message: "Reset request sent to admin." });
+  } catch (err) {
+    console.error("Reset request error:", err);
+    res.status(500).json({ success: false, error: "Server error during password reset request." });
+  }
+});
+
+// ==========================================
+// ADMIN APPROVE & RESET PASSWORD
+// ==========================================
+app.post('/api/staff/admin-reset-password', async (req, res) => {
+  const { username } = req.body;
+  const cleanUsername = username ? username.trim().toLowerCase() : '';
+
+  try {
+    const tempPassword = `CarePoint${Math.floor(1000 + Math.random() * 9000)}`;
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
-    // Logs the timestamp when admin resets the password
     const result = await db.query(
       "UPDATE users SET password = $1, reset_requested = false, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $2 RETURNING id",
       [hashedPassword, cleanUsername]
@@ -215,7 +277,7 @@ app.delete('/api/staff/:username', async (req, res) => {
 });
 
 // ==========================================
-// SECURITY MIDDLEWARE: VERIFY TOKEN & PASSWORD CHANGES
+// SECURITY MIDDLEWARE
 // ==========================================
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -225,21 +287,17 @@ const verifyToken = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    
-    // Check if the user changed their password AFTER this token was issued
     const userResult = await db.query('SELECT password_changed_at FROM users WHERE id = $1', [decoded.id]);
     
     if (userResult.rowCount > 0 && userResult.rows[0].password_changed_at) {
       const passwordChangedTime = new Date(userResult.rows[0].password_changed_at).getTime() / 1000;
-      
-      // decoded.iat is the "Issued At" time of the token
       if (decoded.iat < passwordChangedTime) {
         return res.status(401).json({ error: 'Password was changed. Session expired.', forceLogout: true });
       }
     }
 
-    req.user = decoded; // Attach user info to the request
-    next(); // All good, proceed to the route!
+    req.user = decoded; 
+    next(); 
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token.', forceLogout: true });
   }
@@ -250,7 +308,6 @@ const verifyToken = async (req, res, next) => {
 // ==========================================
 const validCollections = ['patients', 'appointments', 'prescriptions', 'inventory', 'lab-orders', 'lab-reports', 'invoices'];
 
-// 1. PULL: Send all cloud data to the local Electron app on startup
 app.get('/api/:collection', verifyToken, async (req, res, next) => {
   const { collection } = req.params;
   if (!validCollections.includes(collection)) return next();
@@ -265,7 +322,6 @@ app.get('/api/:collection', verifyToken, async (req, res, next) => {
   }
 });
 
-// 2. PUSH (New): Insert a new record into the cloud
 app.post('/api/:collection', verifyToken, async (req, res, next) => {
   const { collection } = req.params;
   if (!validCollections.includes(collection)) return next();
@@ -275,4 +331,96 @@ app.post('/api/:collection', verifyToken, async (req, res, next) => {
 
   try {
     await db.query(`
-      INSERT INTO sync
+      INSERT INTO sync_data (id, collection, payload, last_updated)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      ON CONFLICT (id) 
+      DO UPDATE SET payload = EXCLUDED.payload, last_updated = CURRENT_TIMESTAMP;
+    `, [payload.id, collection, payload]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error(`Error pushing ${collection}:`, err);
+    res.status(500).json({ success: false });
+  }
+});
+
+app.put('/api/:collection/:id', verifyToken, async (req, res, next) => {
+  const { collection, id } = req.params;
+  if (!validCollections.includes(collection)) return next();
+
+  const payload = req.body;
+  try {
+    await db.query(`
+      INSERT INTO sync_data (id, collection, payload, last_updated)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      ON CONFLICT (id) 
+      DO UPDATE SET payload = EXCLUDED.payload, last_updated = CURRENT_TIMESTAMP;
+    `, [id, collection, payload]);
+    
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
+});
+
+app.delete('/api/:collection/:id', verifyToken, async (req, res, next) => {
+  const { collection, id } = req.params;
+  
+  if (!validCollections.includes(collection)) return next();
+
+  try {
+    const result = await db.query(
+      'DELETE FROM sync_data WHERE collection = $1 AND id = $2 RETURNING id', 
+      [collection, id]
+    );
+    
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Record not found in cloud' });
+    }
+    
+    res.json({ success: true, message: 'Record permanently deleted from cloud.' });
+  } catch (err) {
+    console.error(`Error deleting from ${collection}:`, err);
+    res.status(500).json({ success: false, error: 'Database deletion failed' });
+  }
+});
+
+// ==========================================
+// AI CHATBOT ENDPOINT (GROQ GPT-OSS-20B)
+// ==========================================
+const groq = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: "https://api.groq.com/openai/v1",
+});
+
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { message, context, userRole } = req.body;
+    
+    const systemPrompt = `You are a helpful, professional hospital AI assistant for the CarePoint Health Management System. 
+    The current user is a ${userRole}. 
+    Current Hospital Data: ${JSON.stringify(context)}.
+    Answer the user concisely based on this data.`;
+
+    const completion = await groq.chat.completions.create({
+      model: "openai/gpt-oss-20b", 
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: message }
+      ],
+    });
+
+    res.json({ reply: completion.choices[0].message.content });
+  } catch (error) {
+    console.error('Groq API Error:', error);
+    res.status(500).json({ error: 'My AI core is currently offline. Please check the backend connection.' });
+  }
+});
+
+// ==========================================
+// START SERVER
+// ==========================================
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`CarePoint Enterprise API listening on port ${PORT}`);
+});
