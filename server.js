@@ -416,6 +416,28 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: 'My AI core is currently offline. Please check the backend connection.' });
   }
 });
+// ==========================================
+// WHATSAPP NOTIFICATION DISPATCH ROUTE
+// ==========================================
+app.post('/api/notify/whatsapp', verifyToken, async (req, res) => {
+  const { phone, message } = req.body;
+  
+  if (!phone || !message) {
+    return res.status(400).json({ success: false, error: 'Phone number and message are required.' });
+  }
+
+  try {
+    // In production, integrate your Twilio or Meta WhatsApp Cloud API keys here:
+    // const twilioClient = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+    // await twilioClient.messages.create({ body: message, from: 'whatsapp:+14155238886', to: `whatsapp:+91${phone}` });
+
+    console.log(`[WHATSAPP GATEWAY SIMULATION] To: +91 ${phone} | Message: ${message}`);
+    res.json({ success: true, message: 'WhatsApp notification queued / dispatched successfully.' });
+  } catch (error) {
+    console.error('WhatsApp dispatch error:', error);
+    res.status(500).json({ success: false, error: 'Failed to dispatch WhatsApp message.' });
+  }
+});
 
 // ==========================================
 // START SERVER
