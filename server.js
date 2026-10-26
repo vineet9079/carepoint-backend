@@ -116,35 +116,61 @@ app.post('/api/auth/send-otp', async (req, res) => {
   if (!email || !otp) return res.status(400).json({ success: false, error: 'Email and OTP required.' });
 
   try {
-    const nodemailer = require('nodemailer');
-    
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        type: 'OAuth2',
-        user: process.env.EMAIL_USER,
-        clientId: process.env.CLIENT_ID,
-        clientSecret: process.env.CLIENT_SECRET,
-        refreshToken: process.env.REFRESH_TOKEN
-      }
+    // 1. Get a fresh temporary Access Token from Google using your Refresh Token
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.CLIENT_ID,
+        client_secret: process.env.CLIENT_SECRET,
+        refresh_token: process.env.REFRESH_TOKEN,
+        grant_type: 'refresh_token'
+      })
     });
 
-    const mailOptions = {
-      from: `"CarePoint HMS" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: 'CarePoint HMS - Secure Login OTP',
-      html: `<div style="text-align: center; font-family: Arial; padding: 20px;">
-              <h2 style="color: #4355B9;">CarePoint HMS</h2>
-              <p>Your secure login OTP is:</p>
-              <h1 style="letter-spacing: 5px;">${otp}</h1>
-             </div>`
-    };
+    const tokenData = await tokenResponse.json();
+    if (!tokenData.access_token) throw new Error('Failed to get access token');
 
-    await transporter.sendMail(mailOptions);
-    console.log(`[EMAIL API] OTP sent securely to: ${email}`);
-    res.json({ success: true, message: 'OTP dispatched securely via Gmail API.' });
+    // 2. Construct the raw email format
+    const emailContent = [
+      `To: ${email}`,
+      `From: "CarePoint HMS" <${process.env.EMAIL_USER}>`,
+      `Subject: CarePoint HMS - Secure Login OTP`,
+      `Content-Type: text/html; charset=utf-8`,
+      '',
+      `<div style="text-align: center; font-family: Arial; padding: 20px;">`,
+      `  <h2 style="color: #4355B9;">CarePoint HMS</h2>`,
+      `  <p>Your secure login OTP is:</p>`,
+      `  <h1 style="letter-spacing: 5px;">${otp}</h1>`,
+      `</div>`
+    ].join('\r\n');
+
+    // 3. Encode it in Base64 URL format (required by Google)
+    const base64EncodedEmail = Buffer.from(emailContent)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    // 4. Send the email directly via the official Gmail HTTPS API
+    const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${tokenData.access_token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ raw: base64EncodedEmail })
+    });
+
+    if (!sendResponse.ok) {
+      const err = await sendResponse.text();
+      throw new Error(`Gmail API error: ${err}`);
+    }
+
+    console.log(`[EMAIL API] OTP sent securely via HTTPS to: ${email}`);
+    res.json({ success: true, message: 'OTP dispatched securely via Gmail HTTPS API.' });
   } catch (error) {
-    console.error('OAuth2 Email error:', error);
+    console.error('HTTPS Email error:', error);
     res.status(500).json({ success: false, error: 'Failed to send OTP.' });
   }
 });
