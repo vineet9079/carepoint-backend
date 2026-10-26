@@ -257,7 +257,7 @@ const verifyToken = async (req, res, next) => {
 };
 // ==========================================
 // CLINICAL MODULES API (Relational Tables)
--- ==========================================
+// ==========================================
 
 // --- PATIENTS ---
 app.get('/api/patients', verifyToken, async (req, res) => {
