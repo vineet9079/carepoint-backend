@@ -108,7 +108,32 @@ app.post('/api/auth/login', async (req, res) => {
     res.status(500).json({ success: false, error: 'Server error during login' });
   }
 });
+// ==========================================
+// REAL SMS OTP DISPATCH ROUTE
+// ==========================================
+app.post('/api/auth/send-otp', async (req, res) => {
+  const { phone, otp } = req.body;
+  
+  if (!phone || !otp) {
+    return res.status(400).json({ success: false, error: 'Phone and OTP required.' });
+  }
 
+  try {
+    const twilioClient = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+    
+    await twilioClient.messages.create({
+      body: `Your CarePoint login OTP is: ${otp}. Do not share this code with anyone.`,
+      from: process.env.TWILIO_PHONE_NUMBER, // Add your Twilio SMS number to your .env file
+      to: `+91${phone}`
+    });
+
+    console.log(`[SMS LIVE GATEWAY] OTP sent to: +91 ${phone}`);
+    res.json({ success: true, message: 'OTP dispatched successfully.' });
+  } catch (error) {
+    console.error('SMS dispatch error:', error);
+    res.status(500).json({ success: false, error: 'Failed to send SMS.' });
+  }
+});
 // ==========================================
 // GET ALL USERS / STAFF
 // ==========================================
@@ -306,8 +331,7 @@ const verifyToken = async (req, res, next) => {
 // ==========================================
 // UNIVERSAL CLOUD SYNC ROUTES (Protected)
 // ==========================================
-const validCollections = ['patients', 'appointments', 'prescriptions', 'inventory', 'lab-orders', 'lab-reports', 'invoices'];
-
+const validCollections = ['patients', 'appointments', 'prescriptions', 'inventory', 'lab-orders', 'lab-reports', 'invoices', 'notifications'];
 app.get('/api/:collection', verifyToken, async (req, res, next) => {
   const { collection } = req.params;
   if (!validCollections.includes(collection)) return next();
@@ -426,18 +450,23 @@ app.post('/api/notify/whatsapp', verifyToken, async (req, res) => {
     return res.status(400).json({ success: false, error: 'Phone number and message are required.' });
   }
 
-  try {
-    // In production, integrate your Twilio or Meta WhatsApp Cloud API keys here:
-    // const twilioClient = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
-    // await twilioClient.messages.create({ body: message, from: 'whatsapp:+14155238886', to: `whatsapp:+91${phone}` });
+ try {
+    // Live Twilio Integration
+    const twilioClient = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+    
+    await twilioClient.messages.create({ 
+      body: message, 
+      from: 'whatsapp:+17372508034', // Your Twilio Sandbox number
+      to: `whatsapp:+91${phone}` 
+    });
 
-    console.log(`[WHATSAPP GATEWAY SIMULATION] To: +91 ${phone} | Message: ${message}`);
-    res.json({ success: true, message: 'WhatsApp notification queued / dispatched successfully.' });
+    console.log(`[WHATSAPP LIVE GATEWAY] Message sent to: +91 ${phone}`);
+    res.json({ success: true, message: 'WhatsApp notification dispatched successfully.' });
   } catch (error) {
     console.error('WhatsApp dispatch error:', error);
     res.status(500).json({ success: false, error: 'Failed to dispatch WhatsApp message.' });
   }
-});
+}); // <-- THIS CLOSING BRACKET WAS MISSING!
 
 // ==========================================
 // START SERVER
