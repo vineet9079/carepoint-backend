@@ -123,11 +123,10 @@ app.post('/api/auth/send-otp', async (req, res) => {
     
     // Using the working WhatsApp Sandbox instead of SMS
     await twilioClient.messages.create({
-      body: `Your CarePoint login OTP is: ${otp}. Do not share this code with anyone.`,
-      from: 'whatsapp:+17372508034', // Your Twilio Sandbox number
+      body: `Your appointment is coming up on ${otp} at CarePoint`,
+      from: 'whatsapp:+17372508034', 
       to: `whatsapp:+91${phone}`
     });
-
     console.log(`[WHATSAPP OTP GATEWAY] OTP sent to: +91 ${phone}`);
     res.json({ success: true, message: 'OTP dispatched successfully via WhatsApp.' });
   } catch (error) {
