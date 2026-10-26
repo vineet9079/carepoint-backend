@@ -8,6 +8,8 @@ const bcrypt = require('bcryptjs');
 const { OpenAI } = require('openai');
 
 const app = express();
+
+// Middleware
 app.use(cors());
 app.use(express.json());
 
@@ -18,47 +20,94 @@ const db = new Pool({
 });
 
 // ==========================================
+// SEED DATABASE (Safely Initialize Admin & Patch Schema)
+// ==========================================
+const seedDatabase = async () => {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(50) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        role VARCHAR(20) NOT NULL
+      );
+    `);
+    
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS sync_data (
+        id VARCHAR(100) PRIMARY KEY,
+        collection VARCHAR(50) NOT NULL,
+        payload JSONB NOT NULL,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await db.query(`
+      ALTER TABLE users 
+      ADD COLUMN IF NOT EXISTS reset_requested BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP;
+    `);
+    
+    console.log("--> Database tables verified and patched.");
+
+    const adminCheck = await db.query("SELECT * FROM users WHERE LOWER(username) = 'admin'");
+    
+    if (adminCheck.rowCount === 0) {
+      const hashedAdminPass = await bcrypt.hash('admin', 10);
+      await db.query(
+        `INSERT INTO users (username, password, role) VALUES ($1, $2, $3)`,
+        ['admin', hashedAdminPass, 'ADMIN']
+      );
+      console.log("--> Auto-seed: Admin account created successfully.");
+    } else {
+      console.log("--> Auto-seed: Admin account already exists. Password untouched.");
+    }
+  } catch (err) {
+    console.error("Database seeding error:", err);
+  }
+};
+
+seedDatabase();
+
+// ==========================================
 // LOGIN AUTHENTICATION ROUTE
 // ==========================================
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   const cleanUsername = username ? username.trim().toLowerCase() : '';
+  console.log(`--> Login attempt received for username: ${cleanUsername}`);
 
   try {
-    const result = await db.query('SELECT * FROM staff WHERE LOWER(username) = $1', [cleanUsername]);
+    const result = await db.query('SELECT * FROM users WHERE LOWER(username) = $1', [cleanUsername]);
 
     if (result.rowCount === 0) {
       return res.status(401).json({ success: false, error: 'Invalid username or password.' });
     }
 
     const user = result.rows[0];
-    
-    // Fallback for the default admin which might not be hashed initially by the SQL script
-    let isMatch = false;
-    if (user.password === 'admin' && password === 'admin') {
-      isMatch = true;
-      // Auto-hash it for future logins
-      const hashedAdminPass = await bcrypt.hash('admin', 10);
-      await db.query('UPDATE staff SET password = $1 WHERE username = $2', [hashedAdminPass, user.username]);
-    } else {
-      isMatch = await bcrypt.compare(password, user.password);
-    }
+    const isMatch = await bcrypt.compare(password, user.password);
 
     if (isMatch) {
+      console.log(`--> SUCCESS: Logging in user: ${user.username}`);
       const token = jwt.sign(
         { id: user.id, username: user.username, role: user.role },
         JWT_SECRET,
         { expiresIn: '7d' } 
       );
-      res.json({ success: true, token, user: { id: user.id, username: user.username, role: user.role } });
+
+      res.json({ 
+        success: true, 
+        token: token, 
+        user: { id: user.id, username: user.username, role: user.role } 
+      });
     } else {
       res.status(401).json({ success: false, error: 'Invalid username or password.' });
     }
   } catch (error) {
+    console.error('Login error:', error);
     res.status(500).json({ success: false, error: 'Server error during login' });
   }
 });
-
 // ==========================================
 // REAL EMAIL OTP DISPATCH ROUTE
 // ==========================================
@@ -67,6 +116,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
   if (!email || !otp) return res.status(400).json({ success: false, error: 'Email and OTP required.' });
 
   try {
+    // 1. Get a fresh temporary Access Token from Google using your Refresh Token
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -81,6 +131,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
     const tokenData = await tokenResponse.json();
     if (!tokenData.access_token) throw new Error('Failed to get access token');
 
+    // 2. Construct the raw email format
     const emailContent = [
       `To: ${email}`,
       `From: "CarePoint HMS" <${process.env.EMAIL_USER}>`,
@@ -94,22 +145,35 @@ app.post('/api/auth/send-otp', async (req, res) => {
       `</div>`
     ].join('\r\n');
 
+    // 3. Encode it in Base64 URL format (required by Google)
     const base64EncodedEmail = Buffer.from(emailContent)
-      .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
 
+    // 4. Send the email directly via the official Gmail HTTPS API
     const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${tokenData.access_token}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({ raw: base64EncodedEmail })
     });
 
-    if (!sendResponse.ok) throw new Error(await sendResponse.text());
+    if (!sendResponse.ok) {
+      const err = await sendResponse.text();
+      throw new Error(`Gmail API error: ${err}`);
+    }
+
+    console.log(`[EMAIL API] OTP sent securely via HTTPS to: ${email}`);
     res.json({ success: true, message: 'OTP dispatched securely via Gmail HTTPS API.' });
   } catch (error) {
+    console.error('HTTPS Email error:', error);
     res.status(500).json({ success: false, error: 'Failed to send OTP.' });
   }
 });
-
 // ==========================================
 // SECURE EMAIL NOTIFICATIONS (HTTPS BYPASS)
 // ==========================================
@@ -128,66 +192,93 @@ app.post('/api/notify/email', async (req, res) => {
         grant_type: 'refresh_token'
       })
     });
+
     const tokenData = await tokenResponse.json();
     
-    const emailContent = [`To: ${email}`, `From: "CarePoint HMS" <${process.env.EMAIL_USER}>`, `Subject: ${subject}`, `Content-Type: text/html; charset=utf-8`, '', htmlMessage].join('\r\n');
-    const base64EncodedEmail = Buffer.from(emailContent).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const emailContent = [
+      `To: ${email}`,
+      `From: "CarePoint HMS" <${process.env.EMAIL_USER}>`,
+      `Subject: ${subject}`,
+      `Content-Type: text/html; charset=utf-8`,
+      '',
+      htmlMessage
+    ].join('\r\n');
+
+    const base64EncodedEmail = Buffer.from(emailContent)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
 
     await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${tokenData.access_token}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({ raw: base64EncodedEmail })
     });
+
     res.json({ success: true });
   } catch (error) {
+    console.error('Notification Email error:', error);
     res.status(500).json({ error: 'Failed to send notification.' });
   }
 });
-
 // ==========================================
 // GENERATE SECURE PATIENT TOKEN
 // ==========================================
-app.post('/api/auth/patient-token', async (req, res) => {
+app.post('/api/auth/patient-token', (req, res) => {
   const { email } = req.body;
-  try {
-    const token = jwt.sign({ id: email, role: 'patient' }, JWT_SECRET, { expiresIn: '7d' });
-    const result = await db.query('SELECT * FROM patients WHERE email = $1 OR phone = $1', [email]);
-    const patient = result.rows.length > 0 ? result.rows[0] : null;
-    res.json({ success: true, token, patient });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error generating token' });
-  }
+  const token = jwt.sign(
+    { id: email, role: 'patient' },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+  res.json({ success: true, token });
 });
-
 // ==========================================
-// STAFF MANAGEMENT API
+// GET ALL USERS / STAFF
 // ==========================================
 app.get('/api/staff', async (req, res) => {
   try {
-    const result = await db.query('SELECT id, name, username, role, badge_color, dot_color, inits FROM staff ORDER BY id ASC');
-    res.json({ success: true, staff: result.rows }); // Match frontend expect
-    // Fallback: If frontend expects an array directly, you might need to adjust based on App.jsx fetch
+    const result = await db.query('SELECT id, username, role, reset_requested FROM users ORDER BY id ASC');
+    res.json({ success: true, staff: result.rows });
   } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error fetching staff:', error);
+    res.status(500).json({ error: 'Server error while fetching staff' });
   }
 });
 
+// ==========================================
+// ADD NEW STAFF ENDPOINT
+// ==========================================
 app.post('/api/staff/add', async (req, res) => {
-  const { id, name, username, password, role, badge_color, dot_color, inits } = req.body;
+  const { username, password, role } = req.body;
   const cleanUsername = username ? username.trim().toLowerCase() : '';
+  
   try {
-    const existing = await db.query('SELECT * FROM staff WHERE LOWER(username) = $1', [cleanUsername]);
-    if (existing.rowCount > 0) return res.status(400).json({ success: false, error: 'Username already exists.' });
+    const existingUser = await db.query('SELECT * FROM users WHERE LOWER(username) = $1', [cleanUsername]);
+    if (existingUser.rowCount > 0) {
+      return res.status(400).json({ success: false, error: 'Username already exists.' });
+    }
 
-    const hashed = await bcrypt.hash(password, 10);
-    const query = `INSERT INTO staff (id, name, username, password, role, badge_color, dot_color, inits) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`;
-    const result = await db.query(query, [id, name, cleanUsername, hashed, role, badge_color, dot_color, inits]);
-    res.json({ success: true, user: result.rows[0] });
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await db.query(
+      `INSERT INTO users (username, password, role) VALUES ($1, $2, $3)`,
+      [cleanUsername, hashedPassword, role]
+    );
+    
+    res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error creating staff:', error);
+    res.status(500).json({ error: 'Server error while creating staff' });
   }
 });
 
+// ==========================================
+// UPDATE STAFF / ADMIN ENDPOINT
+// ==========================================
 app.put('/api/staff/update', async (req, res) => {
   const { currentUsername, newUsername, password, role } = req.body;
   const cleanCurrent = currentUsername ? currentUsername.trim().toLowerCase() : '';
@@ -195,293 +286,229 @@ app.put('/api/staff/update', async (req, res) => {
 
   try {
     if (password && password.trim() !== '') {
-      const hashed = await bcrypt.hash(password, 10);
-      await db.query(`UPDATE staff SET username = $1, password = $2, role = $3, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $4`, [cleanNew, hashed, role, cleanCurrent]);
+      const hashedPassword = await bcrypt.hash(password, 10);
+      await db.query(
+        `UPDATE users SET username = $1, password = $2, role = $3, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $4`,
+        [cleanNew, hashedPassword, role, cleanCurrent]
+      );
     } else {
-      await db.query(`UPDATE staff SET username = $1, role = $2 WHERE LOWER(username) = $3`, [cleanNew, role, cleanCurrent]);
+      await db.query(
+        `UPDATE users SET username = $1, role = $2 WHERE LOWER(username) = $3`,
+        [cleanNew, role, cleanCurrent]
+      );
     }
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.delete('/api/staff/:username', async (req, res) => {
-  try {
-    await db.query(`DELETE FROM staff WHERE LOWER(username) = $1`, [req.params.username.trim().toLowerCase()]);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.put('/api/staff/change-password', async (req, res) => {
-  const { username, oldPassword, newPassword } = req.body;
-  try {
-    const result = await db.query('SELECT * FROM staff WHERE LOWER(username) = $1', [username.trim().toLowerCase()]);
-    if (result.rowCount === 0) return res.status(404).json({ error: 'User not found.' });
-    
-    const isOldPasswordCorrect = await bcrypt.compare(oldPassword, result.rows[0].password);
-    if (!isOldPasswordCorrect) return res.status(400).json({ error: 'Incorrect current password.' });
-
-    const hashed = await bcrypt.hash(newPassword, 10);
-    await db.query('UPDATE staff SET password = $1, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $2', [hashed, username.trim().toLowerCase()]);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error updating staff:', error);
+    res.status(500).json({ error: 'Server error while updating staff' });
   }
 });
 
 // ==========================================
-// SECURITY MIDDLEWARE (For remaining routes)
+// DELETE STAFF ENDPOINT
+// ==========================================
+app.delete('/api/staff/:username', async (req, res) => {
+  const usernameToDelete = req.params.username.trim().toLowerCase();
+
+  try {
+    await db.query(`DELETE FROM users WHERE LOWER(username) = $1`, [usernameToDelete]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting staff:', error);
+    res.status(500).json({ error: 'Server error while deleting staff' });
+  }
+});
+
+// ==========================================
+// CHANGE PASSWORD
+// ==========================================
+app.put('/api/staff/change-password', async (req, res) => {
+  const { username, oldPassword, newPassword } = req.body;
+  const cleanUsername = username ? username.trim().toLowerCase() : '';
+
+  try {
+    const result = await db.query('SELECT * FROM users WHERE LOWER(username) = $1', [cleanUsername]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'User not found.' });
+    
+    const user = result.rows[0];
+    const isOldPasswordCorrect = await bcrypt.compare(oldPassword, user.password);
+    if (!isOldPasswordCorrect) {
+      return res.status(400).json({ error: 'Incorrect current password.' });
+    }
+
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+    await db.query(
+      'UPDATE users SET password = $1, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $2', 
+      [hashedNewPassword, cleanUsername]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Password change error:', error);
+    res.status(500).json({ error: 'Server error while changing password.' });
+  }
+});
+
+// ==========================================
+// FORGOT PASSWORD: REQUEST RESET
+// ==========================================
+app.post('/api/auth/request-reset', async (req, res) => {
+  const { username } = req.body;
+  const cleanUsername = username ? username.trim().toLowerCase() : '';
+
+  try {
+    const result = await db.query(
+      "UPDATE users SET reset_requested = true WHERE LOWER(username) = $1 RETURNING id",
+      [cleanUsername]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: "User not found." });
+    }
+
+    res.json({ success: true, message: "Reset request sent to admin." });
+  } catch (err) {
+    console.error("Reset request error:", err);
+    res.status(500).json({ success: false, error: "Server error during password reset request." });
+  }
+});
+
+// ==========================================
+// ADMIN APPROVE & RESET PASSWORD
+// ==========================================
+app.post('/api/staff/admin-reset-password', async (req, res) => {
+  const { username } = req.body;
+  const cleanUsername = username ? username.trim().toLowerCase() : '';
+
+  try {
+    const tempPassword = `CarePoint${Math.floor(1000 + Math.random() * 9000)}`;
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+    const result = await db.query(
+      "UPDATE users SET password = $1, reset_requested = false, password_changed_at = CURRENT_TIMESTAMP WHERE LOWER(username) = $2 RETURNING id",
+      [hashedPassword, cleanUsername]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: "User not found." });
+    }
+
+    res.json({ 
+      success: true, 
+      tempPassword: tempPassword,
+      message: `Password reset successfully for ${cleanUsername}` 
+    });
+  } catch (err) {
+    console.error("Admin reset error:", err);
+    res.status(500).json({ error: "Database error during admin password reset." });
+  }
+});
+
+// ==========================================
+// SECURITY MIDDLEWARE
 // ==========================================
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  if (!authHeader) return res.status(401).json({ error: 'Access denied.', forceLogout: true });
+  if (!authHeader) return res.status(401).json({ error: 'Access denied. No token provided.', forceLogout: true });
 
   const token = authHeader.split(' ')[1];
+
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    if(decoded.role !== 'patient') {
-      const userResult = await db.query('SELECT password_changed_at FROM staff WHERE id = $1', [decoded.id]);
-      if (userResult.rowCount > 0 && userResult.rows[0].password_changed_at) {
-        const passwordChangedTime = new Date(userResult.rows[0].password_changed_at).getTime() / 1000;
-        if (decoded.iat < passwordChangedTime) return res.status(401).json({ error: 'Session expired.', forceLogout: true });
+    const userResult = await db.query('SELECT password_changed_at FROM users WHERE id = $1', [decoded.id]);
+    
+    if (userResult.rowCount > 0 && userResult.rows[0].password_changed_at) {
+      const passwordChangedTime = new Date(userResult.rows[0].password_changed_at).getTime() / 1000;
+      if (decoded.iat < passwordChangedTime) {
+        return res.status(401).json({ error: 'Password was changed. Session expired.', forceLogout: true });
       }
     }
+
     req.user = decoded; 
     next(); 
   } catch (err) {
-    return res.status(401).json({ error: 'Invalid token.', forceLogout: true });
+    return res.status(401).json({ error: 'Invalid or expired token.', forceLogout: true });
   }
 };
+
 // ==========================================
-// CLINICAL MODULES API (Relational Tables)
+// UNIVERSAL CLOUD SYNC ROUTES (Protected)
 // ==========================================
+const validCollections = ['patients', 'appointments', 'prescriptions', 'inventory', 'lab-orders', 'lab-reports', 'invoices', 'notifications'];
+app.get('/api/:collection', verifyToken, async (req, res, next) => {
+  const { collection } = req.params;
+  if (!validCollections.includes(collection)) return next();
 
-// --- PATIENTS ---
-app.get('/api/patients', verifyToken, async (req, res) => {
   try {
-    const result = await db.query('SELECT * FROM patients ORDER BY created_at DESC');
-    res.json(result.rows);
+    const result = await db.query('SELECT payload FROM sync_data WHERE collection = $1', [collection]);
+    const data = result.rows.map(row => row.payload);
+    res.json({ success: true, data });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch patients' });
+    console.error(`Error pulling ${collection}:`, err);
+    res.status(500).json({ success: false, error: 'Database fetch failed' });
   }
 });
 
-app.post('/api/patients', async (req, res) => {
-  const { id, name, email, phone, dob, age, gender, bloodGroup, inits, color } = req.body;
-  try {
-    const query = `
-      INSERT INTO patients (id, name, email, phone, dob, age, gender, blood_group, inits, color) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) 
-      ON CONFLICT (id) DO UPDATE SET 
-        name = EXCLUDED.name, email = EXCLUDED.email, phone = EXCLUDED.phone, 
-        blood_group = EXCLUDED.blood_group, gender = EXCLUDED.gender
-      RETURNING *;
-    `;
-    const result = await db.query(query, [id, name, email, phone, dob || null, age || 25, gender || 'Other', bloodGroup || 'O+', inits || 'PT', color || 'bg-blue-500']);
-    res.json({ success: true, patient: result.rows[0] });
-  } catch (err) {
-    console.error("Patient save error:", err);
-    res.status(500).json({ error: 'Failed to save patient' });
-  }
-});
+app.post('/api/:collection', verifyToken, async (req, res, next) => {
+  const { collection } = req.params;
+  if (!validCollections.includes(collection)) return next();
 
-// --- APPOINTMENTS ---
-app.get('/api/appointments', verifyToken, async (req, res) => {
-  try {
-    const result = await db.query('SELECT * FROM appointments ORDER BY date DESC, time DESC');
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch appointments' });
-  }
-});
+  const payload = req.body;
+  if (!payload || !payload.id) return res.status(400).json({ error: 'Missing payload or ID' });
 
-app.post('/api/appointments', async (req, res) => {
-  const { id, patientId, patientName, doctorId, doctorName, date, time, reason, status } = req.body;
   try {
-    const query = `
-      INSERT INTO appointments (id, patient_id, patient_name, doctor_id, doctor_name, date, time, reason, status) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
-      ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, time = EXCLUDED.time
-      RETURNING *;
-    `;
-    const result = await db.query(query, [id, patientId, patientName, doctorId, doctorName, date, time, reason || 'Checkup', status || 'Scheduled']);
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("Appointment save error:", err);
-    res.status(500).json({ error: 'Failed to save appointment' });
-  }
-});
-
-app.put('/api/appointments/:id', verifyToken, async (req, res) => {
-  const { status, time } = req.body;
-  try {
-    const result = await db.query(
-      'UPDATE appointments SET status = COALESCE($1, status), time = COALESCE($2, time) WHERE id = $3 RETURNING *',
-      [status, time, req.params.id]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Update failed' });
-  }
-});
-
-app.delete('/api/appointments/:id', verifyToken, async (req, res) => {
-  try {
-    await db.query('DELETE FROM appointments WHERE id = $1', [req.params.id]);
+    await db.query(`
+      INSERT INTO sync_data (id, collection, payload, last_updated)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      ON CONFLICT (id) 
+      DO UPDATE SET payload = EXCLUDED.payload, last_updated = CURRENT_TIMESTAMP;
+    `, [payload.id, collection, payload]);
+    
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: 'Deletion failed' });
+    console.error(`Error pushing ${collection}:`, err);
+    res.status(500).json({ success: false });
   }
 });
 
-// --- LAB RECORDS ---
-app.get('/api/lab-orders', verifyToken, async (req, res) => {
+app.put('/api/:collection/:id', verifyToken, async (req, res, next) => {
+  const { collection, id } = req.params;
+  if (!validCollections.includes(collection)) return next();
+
+  const payload = req.body;
   try {
-    const result = await db.query("SELECT * FROM lab_records WHERE status != 'COMPLETED' ORDER BY id DESC");
-    res.json(result.rows);
+    await db.query(`
+      INSERT INTO sync_data (id, collection, payload, last_updated)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      ON CONFLICT (id) 
+      DO UPDATE SET payload = EXCLUDED.payload, last_updated = CURRENT_TIMESTAMP;
+    `, [id, collection, payload]);
+    
+    res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch lab orders' });
+    res.status(500).json({ success: false });
   }
 });
 
-app.get('/api/lab-reports', verifyToken, async (req, res) => {
-  try {
-    const result = await db.query("SELECT * FROM lab_records WHERE status = 'COMPLETED' ORDER BY reported_date DESC");
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch lab reports' });
-  }
-});
+app.delete('/api/:collection/:id', verifyToken, async (req, res, next) => {
+  const { collection, id } = req.params;
+  
+  if (!validCollections.includes(collection)) return next();
 
-app.post('/api/lab-orders', async (req, res) => {
-  const { id, patientId, testName, status } = req.body;
   try {
-    const query = `
-      INSERT INTO lab_records (id, patient_id, test_name, status) 
-      VALUES ($1, $2, $3, $4) 
-      ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status
-      RETURNING *;
-    `;
-    const result = await db.query(query, [id, patientId, testName, status || 'PENDING']);
-    res.json(result.rows[0]);
+    const result = await db.query(
+      'DELETE FROM sync_data WHERE collection = $1 AND id = $2 RETURNING id', 
+      [collection, id]
+    );
+    
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Record not found in cloud' });
+    }
+    
+    res.json({ success: true, message: 'Record permanently deleted from cloud.' });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to save lab order' });
-  }
-});
-
-app.put('/api/lab-reports/:id', verifyToken, async (req, res) => {
-  const { result, status } = req.body;
-  try {
-    const query = `
-      UPDATE lab_records 
-      SET result = $1, status = $2, reported_date = CURRENT_TIMESTAMP 
-      WHERE id = $3 RETURNING *;
-    `;
-    const updated = await db.query(query, [result, status || 'COMPLETED', req.params.id]);
-    res.json(updated.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to save report' });
-  }
-});
-
-// --- PRESCRIPTIONS ---
-app.get('/api/prescriptions', verifyToken, async (req, res) => {
-  try {
-    const result = await db.query('SELECT * FROM prescriptions ORDER BY created_at DESC');
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch prescriptions' });
-  }
-});
-
-app.post('/api/prescriptions', verifyToken, async (req, res) => {
-  const { id, patientId, patientName, diagnosis, medications, totalCost, status } = req.body;
-  try {
-    const query = `
-      INSERT INTO prescriptions (id, patient_id, patient_name, diagnosis, medications, total_cost, status) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7) 
-      ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status
-      RETURNING *;
-    `;
-    const result = await db.query(query, [id, patientId, patientName, diagnosis, JSON.stringify(medications), totalCost || 0, status || 'PENDING']);
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to save prescription' });
-  }
-});
-
-app.put('/api/prescriptions/:id', verifyToken, async (req, res) => {
-  const { status } = req.body;
-  try {
-    const result = await db.query('UPDATE prescriptions SET status = $1 WHERE id = $2 RETURNING *', [status, req.params.id]);
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to update prescription' });
-  }
-});
-
-// --- INVENTORY ---
-app.get('/api/inventory', verifyToken, async (req, res) => {
-  try {
-    const result = await db.query('SELECT * FROM inventory ORDER BY name ASC');
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch inventory' });
-  }
-});
-
-app.post('/api/inventory', verifyToken, async (req, res) => {
-  const { id, name, batch, expiry, quantity, unitPrice } = req.body;
-  try {
-    const query = `
-      INSERT INTO inventory (id, name, batch, expiry, quantity, unit_price) 
-      VALUES ($1, $2, $3, $4, $5, $6) 
-      ON CONFLICT (id) DO UPDATE SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price
-      RETURNING *;
-    `;
-    const result = await db.query(query, [id, name, batch, expiry, quantity, unitPrice]);
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to save inventory item' });
-  }
-});
-
-// --- INVOICES ---
-app.get('/api/invoices', verifyToken, async (req, res) => {
-  try {
-    const result = await db.query('SELECT * FROM invoices ORDER BY invoice_date DESC');
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch invoices' });
-  }
-});
-
-app.post('/api/invoices', verifyToken, async (req, res) => {
-  const { id, patientId, patientName, services, subtotal, gst, totalAmount, status } = req.body;
-  try {
-    const query = `
-      INSERT INTO invoices (id, patient_id, patient_name, services, subtotal, gst, total_amount, status) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-      ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status
-      RETURNING *;
-    `;
-    const result = await db.query(query, [id, patientId, patientName, services, subtotal, gst, totalAmount, status || 'PENDING']);
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to save invoice' });
-  }
-});
-
-app.put('/api/invoices/:id', verifyToken, async (req, res) => {
-  const { status } = req.body;
-  try {
-    const result = await db.query('UPDATE invoices SET status = $1 WHERE id = $2 RETURNING *', [status, req.params.id]);
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Invoice update failed' });
+    console.error(`Error deleting from ${collection}:`, err);
+    res.status(500).json({ success: false, error: 'Database deletion failed' });
   }
 });
 
@@ -496,43 +523,58 @@ const groq = new OpenAI({
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, context, userRole } = req.body;
-    const systemPrompt = `You are a helpful hospital AI assistant for CarePoint HMS. User role: ${userRole}. Data: ${JSON.stringify(context)}.`;
+    
+    const systemPrompt = `You are a helpful, professional hospital AI assistant for the CarePoint Health Management System. 
+    The current user is a ${userRole}. 
+    Current Hospital Data: ${JSON.stringify(context)}.
+    Answer the user concisely based on this data.`;
 
     const completion = await groq.chat.completions.create({
       model: "openai/gpt-oss-20b", 
-      messages: [{ role: "system", content: systemPrompt }, { role: "user", content: message }],
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: message }
+      ],
     });
 
     res.json({ reply: completion.choices[0].message.content });
   } catch (error) {
-    res.status(500).json({ error: 'AI core is currently offline.' });
+    console.error('Groq API Error:', error);
+    res.status(500).json({ error: 'My AI core is currently offline. Please check the backend connection.' });
   }
 });
-
 // ==========================================
 // WHATSAPP NOTIFICATION DISPATCH ROUTE
 // ==========================================
 app.post('/api/notify/whatsapp', verifyToken, async (req, res) => {
   const { phone, message } = req.body;
-  if (!phone || !message) return res.status(400).json({ success: false, error: 'Phone and message required.' });
+  
+  if (!phone || !message) {
+    return res.status(400).json({ success: false, error: 'Phone number and message are required.' });
+  }
 
  try {
+    // Live Twilio Integration
     const twilioClient = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+    
     await twilioClient.messages.create({ 
       body: message, 
-      from: 'whatsapp:+17372508034', 
+      from: 'whatsapp:+17372508034', // Your Twilio Sandbox number
       to: `whatsapp:+91${phone}` 
     });
-    res.json({ success: true });
+
+    console.log(`[WHATSAPP LIVE GATEWAY] Message sent to: +91 ${phone}`);
+    res.json({ success: true, message: 'WhatsApp notification dispatched successfully.' });
   } catch (error) {
+    console.error('WhatsApp dispatch error:', error);
     res.status(500).json({ success: false, error: 'Failed to dispatch WhatsApp message.' });
   }
-});
+}); // <-- THIS CLOSING BRACKET WAS MISSING!
 
 // ==========================================
 // START SERVER
 // ==========================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`CarePoint Enterprise Cloud Server listening on port ${PORT}`);
+  console.log(`CarePoint Enterprise API listening on port ${PORT}`);
 });
