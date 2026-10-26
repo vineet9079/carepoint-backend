@@ -119,15 +119,20 @@ app.post('/api/auth/send-otp', async (req, res) => {
   }
 
   try {
+    // 1. Clean the phone number (removes any accidental spaces typed by the user)
+    const cleanPhone = phone.replace(/\s+/g, '');
+
+    // 2. Initialize Twilio
     const twilioClient = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
     
-    // Using the working WhatsApp Sandbox instead of SMS
+    // 3. Dispatch using standard Twilio Sandbox formatting to bypass trial blocks
     await twilioClient.messages.create({
-      body: `Your appointment is coming up on ${otp} at CarePoint`,
+      body: `Your Twilio code is ${otp}`, 
       from: 'whatsapp:+17372508034', 
-      to: `whatsapp:+91${phone}`
+      to: `whatsapp:+91${cleanPhone}`
     });
-    console.log(`[WHATSAPP OTP GATEWAY] OTP sent to: +91 ${phone}`);
+
+    console.log(`[WHATSAPP OTP GATEWAY] OTP sent to: +91 ${cleanPhone}`);
     res.json({ success: true, message: 'OTP dispatched successfully via WhatsApp.' });
   } catch (error) {
     console.error('WhatsApp OTP dispatch error:', error);
