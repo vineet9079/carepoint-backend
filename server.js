@@ -226,6 +226,18 @@ app.post('/api/notify/email', async (req, res) => {
   }
 });
 // ==========================================
+// GENERATE SECURE PATIENT TOKEN
+// ==========================================
+app.post('/api/auth/patient-token', (req, res) => {
+  const { email } = req.body;
+  const token = jwt.sign(
+    { id: email, role: 'patient' },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+  res.json({ success: true, token });
+});
+// ==========================================
 // GET ALL USERS / STAFF
 // ==========================================
 app.get('/api/staff', async (req, res) => {
