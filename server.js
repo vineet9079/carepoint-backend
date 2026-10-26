@@ -124,7 +124,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
     // Using the working WhatsApp Sandbox instead of SMS
     await twilioClient.messages.create({
       body: `Your CarePoint login OTP is: ${otp}. Do not share this code with anyone.`,
-      from: 'whatsapp:+17372508034', // Your Twilio Sandbox number
+      from: 'whatsapp:+14155238886', // Your Twilio Sandbox number
       to: `whatsapp:+91${phone}`
     });
 
@@ -457,7 +457,7 @@ app.post('/api/notify/whatsapp', verifyToken, async (req, res) => {
     
     await twilioClient.messages.create({ 
       body: message, 
-      from: 'whatsapp:+17372508034', // Your Twilio Sandbox number
+      from: 'whatsapp:+14155238886', // Your Twilio Sandbox number
       to: `whatsapp:+91${phone}` 
     });
 
