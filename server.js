@@ -109,42 +109,29 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 // ==========================================
-// REAL EMAIL OTP DISPATCH ROUTE (NODEMAILER)
+// REAL EMAIL OTP DISPATCH ROUTE
 // ==========================================
 app.post('/api/auth/send-otp', async (req, res) => {
   const { email, otp } = req.body;
-  
-  if (!email || !otp) {
-    return res.status(400).json({ success: false, error: 'Email and OTP required.' });
-  }
+  if (!email || !otp) return res.status(400).json({ success: false, error: 'Email and OTP required.' });
 
   try {
-    const nodemailer = require('nodemailer');
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: process.env.EMAIL_USER, 
-        pass: process.env.EMAIL_PASS  
-      }
+    const { Resend } = require('resend');
+    const resend = new Resend(process.env.RESEND_API_KEY);
+
+    await resend.emails.send({
+      from: 'CarePoint HMS <onboarding@resend.dev>', // Free tier default sender
+      to: email, 
+      subject: 'CarePoint HMS - Secure Login OTP',
+      html: `<div style="text-align: center; font-family: Arial; padding: 20px;">
+               <h2 style="color: #4355B9;">CarePoint HMS</h2>
+               <p>Your secure login OTP is:</p>
+               <h1 style="letter-spacing: 5px;">${otp}</h1>
+             </div>`
     });
 
-    const mailOptions = {
-      from: `"CarePoint HMS" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: 'CarePoint HMS - Secure Login OTP',
-      html: `<div style="font-family: Arial, sans-serif; padding: 20px; text-align: center; border: 1px solid #eee; border-radius: 10px;">
-              <h2 style="color: #4355B9;">CarePoint HMS</h2>
-              <p>Your secure login OTP is:</p>
-              <h1 style="letter-spacing: 5px; color: #333;">${otp}</h1>
-              <p style="color: #777; font-size: 12px;">Do not share this code with anyone. It is valid for a single login.</p>
-             </div>`
-    };
-
-    await transporter.sendMail(mailOptions);
-    console.log(`[EMAIL GATEWAY] OTP sent to: ${email}`);
-    res.json({ success: true, message: 'OTP dispatched successfully via Email.' });
+    res.json({ success: true, message: 'OTP dispatched successfully.' });
   } catch (error) {
-    console.error('Email OTP dispatch error:', error);
     res.status(500).json({ success: false, error: 'Failed to send Email OTP.' });
   }
 });
