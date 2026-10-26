@@ -175,6 +175,57 @@ app.post('/api/auth/send-otp', async (req, res) => {
   }
 });
 // ==========================================
+// SECURE EMAIL NOTIFICATIONS (HTTPS BYPASS)
+// ==========================================
+app.post('/api/notify/email', async (req, res) => {
+  const { email, subject, htmlMessage } = req.body;
+  if (!email || !htmlMessage) return res.status(400).json({ error: 'Email and message required.' });
+
+  try {
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.CLIENT_ID,
+        client_secret: process.env.CLIENT_SECRET,
+        refresh_token: process.env.REFRESH_TOKEN,
+        grant_type: 'refresh_token'
+      })
+    });
+
+    const tokenData = await tokenResponse.json();
+    
+    const emailContent = [
+      `To: ${email}`,
+      `From: "CarePoint HMS" <${process.env.EMAIL_USER}>`,
+      `Subject: ${subject}`,
+      `Content-Type: text/html; charset=utf-8`,
+      '',
+      htmlMessage
+    ].join('\r\n');
+
+    const base64EncodedEmail = Buffer.from(emailContent)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${tokenData.access_token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ raw: base64EncodedEmail })
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Notification Email error:', error);
+    res.status(500).json({ error: 'Failed to send notification.' });
+  }
+});
+// ==========================================
 // GET ALL USERS / STAFF
 // ==========================================
 app.get('/api/staff', async (req, res) => {
