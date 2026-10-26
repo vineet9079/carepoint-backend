@@ -116,23 +116,36 @@ app.post('/api/auth/send-otp', async (req, res) => {
   if (!email || !otp) return res.status(400).json({ success: false, error: 'Email and OTP required.' });
 
   try {
-    const { Resend } = require('resend');
-    const resend = new Resend(process.env.RESEND_API_KEY);
-
-    await resend.emails.send({
-      from: 'CarePoint HMS <onboarding@resend.dev>', // Free tier default sender
-      to: email, 
-      subject: 'CarePoint HMS - Secure Login OTP',
-      html: `<div style="text-align: center; font-family: Arial; padding: 20px;">
-               <h2 style="color: #4355B9;">CarePoint HMS</h2>
-               <p>Your secure login OTP is:</p>
-               <h1 style="letter-spacing: 5px;">${otp}</h1>
-             </div>`
+    const nodemailer = require('nodemailer');
+    
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        type: 'OAuth2',
+        user: process.env.EMAIL_USER,
+        clientId: process.env.CLIENT_ID,
+        clientSecret: process.env.CLIENT_SECRET,
+        refreshToken: process.env.REFRESH_TOKEN
+      }
     });
 
-    res.json({ success: true, message: 'OTP dispatched successfully.' });
+    const mailOptions = {
+      from: `"CarePoint HMS" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: 'CarePoint HMS - Secure Login OTP',
+      html: `<div style="text-align: center; font-family: Arial; padding: 20px;">
+              <h2 style="color: #4355B9;">CarePoint HMS</h2>
+              <p>Your secure login OTP is:</p>
+              <h1 style="letter-spacing: 5px;">${otp}</h1>
+             </div>`
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(`[EMAIL API] OTP sent securely to: ${email}`);
+    res.json({ success: true, message: 'OTP dispatched securely via Gmail API.' });
   } catch (error) {
-    res.status(500).json({ success: false, error: 'Failed to send Email OTP.' });
+    console.error('OAuth2 Email error:', error);
+    res.status(500).json({ success: false, error: 'Failed to send OTP.' });
   }
 });
 // ==========================================
