@@ -109,34 +109,43 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 // ==========================================
-// REAL WHATSAPP OTP DISPATCH ROUTE
+// REAL EMAIL OTP DISPATCH ROUTE (NODEMAILER)
 // ==========================================
 app.post('/api/auth/send-otp', async (req, res) => {
-  const { phone, otp } = req.body;
+  const { email, otp } = req.body;
   
-  if (!phone || !otp) {
-    return res.status(400).json({ success: false, error: 'Phone and OTP required.' });
+  if (!email || !otp) {
+    return res.status(400).json({ success: false, error: 'Email and OTP required.' });
   }
 
   try {
-    // 1. Clean the phone number (removes any accidental spaces typed by the user)
-    const cleanPhone = phone.replace(/\s+/g, '');
-
-    // 2. Initialize Twilio
-    const twilioClient = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
-    
-    // 3. Dispatch using standard Twilio Sandbox formatting to bypass trial blocks
-    await twilioClient.messages.create({
-      body: `Your Twilio code is ${otp}`, 
-      from: 'whatsapp:+17372508034', 
-      to: `whatsapp:+91${cleanPhone}`
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER, 
+        pass: process.env.EMAIL_PASS  
+      }
     });
 
-    console.log(`[WHATSAPP OTP GATEWAY] OTP sent to: +91 ${cleanPhone}`);
-    res.json({ success: true, message: 'OTP dispatched successfully via WhatsApp.' });
+    const mailOptions = {
+      from: `"CarePoint HMS" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: 'CarePoint HMS - Secure Login OTP',
+      html: `<div style="font-family: Arial, sans-serif; padding: 20px; text-align: center; border: 1px solid #eee; border-radius: 10px;">
+              <h2 style="color: #4355B9;">CarePoint HMS</h2>
+              <p>Your secure login OTP is:</p>
+              <h1 style="letter-spacing: 5px; color: #333;">${otp}</h1>
+              <p style="color: #777; font-size: 12px;">Do not share this code with anyone. It is valid for a single login.</p>
+             </div>`
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(`[EMAIL GATEWAY] OTP sent to: ${email}`);
+    res.json({ success: true, message: 'OTP dispatched successfully via Email.' });
   } catch (error) {
-    console.error('WhatsApp OTP dispatch error:', error);
-    res.status(500).json({ success: false, error: 'Failed to send WhatsApp OTP.' });
+    console.error('Email OTP dispatch error:', error);
+    res.status(500).json({ success: false, error: 'Failed to send Email OTP.' });
   }
 });
 // ==========================================
