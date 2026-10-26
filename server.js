@@ -109,7 +109,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 // ==========================================
-// REAL SMS OTP DISPATCH ROUTE
+// REAL WHATSAPP OTP DISPATCH ROUTE
 // ==========================================
 app.post('/api/auth/send-otp', async (req, res) => {
   const { phone, otp } = req.body;
@@ -121,17 +121,18 @@ app.post('/api/auth/send-otp', async (req, res) => {
   try {
     const twilioClient = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
     
+    // Using the working WhatsApp Sandbox instead of SMS
     await twilioClient.messages.create({
       body: `Your CarePoint login OTP is: ${otp}. Do not share this code with anyone.`,
-      from: process.env.TWILIO_PHONE_NUMBER, // Add your Twilio SMS number to your .env file
-      to: `+91${phone}`
+      from: 'whatsapp:+17372508034', // Your Twilio Sandbox number
+      to: `whatsapp:+91${phone}`
     });
 
-    console.log(`[SMS LIVE GATEWAY] OTP sent to: +91 ${phone}`);
-    res.json({ success: true, message: 'OTP dispatched successfully.' });
+    console.log(`[WHATSAPP OTP GATEWAY] OTP sent to: +91 ${phone}`);
+    res.json({ success: true, message: 'OTP dispatched successfully via WhatsApp.' });
   } catch (error) {
-    console.error('SMS dispatch error:', error);
-    res.status(500).json({ success: false, error: 'Failed to send SMS.' });
+    console.error('WhatsApp OTP dispatch error:', error);
+    res.status(500).json({ success: false, error: 'Failed to send WhatsApp OTP.' });
   }
 });
 // ==========================================
