@@ -499,21 +499,22 @@ app.get('/api/invoices', verifyToken, async (req, res) => {
   }
 });
 app.post('/api/invoices', verifyToken, async (req, res) => {
-  const { id, patientId, patientName, services, subtotal, gst, totalAmount, status } = req.body;
+  // FIX: Read 'gstAmount' and 'date' correctly from the frontend
+  const { id, patientId, patientName, services, subtotal, gstAmount, totalAmount, status, date } = req.body;
   try {
     const query = `
-      INSERT INTO invoices (id, patient_id, patient_name, services, subtotal, gst, total_amount, status) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+      INSERT INTO invoices (id, patient_id, patient_name, services, subtotal, gst, total_amount, status, invoice_date) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, CURRENT_DATE)) 
       ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status
       RETURNING *;
     `;
-    const result = await db.query(query, [id, patientId, patientName, services, subtotal, gst, totalAmount, status || 'PENDING']);
+    const result = await db.query(query, [id, patientId, patientName, services, subtotal, gstAmount || 0, totalAmount, status || 'PENDING', date]);
     res.json(result.rows[0]);
   } catch (err) {
+    console.error("Invoice save error:", err);
     res.status(500).json({ error: 'Failed to save invoice' });
   }
 });
-
 app.put('/api/invoices/:id', verifyToken, async (req, res) => {
   const { status } = req.body;
   try {
@@ -521,6 +522,28 @@ app.put('/api/invoices/:id', verifyToken, async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: 'Invoice update failed' });
+  }
+});
+// --- NOTIFICATIONS (NEW) ---
+app.get('/api/notifications', verifyToken, async (req, res) => {
+  try {
+    const result = await db.query('SELECT * FROM notifications ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json([]);
+  }
+});
+
+app.post('/api/notifications', verifyToken, async (req, res) => {
+  const { id, title, message, time, recipient, sender } = req.body;
+  try {
+    await db.query(
+      `INSERT INTO notifications (id, title, message, time, recipient, sender) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING`,
+      [id, title, message, time, recipient, JSON.stringify(sender)]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save notification' });
   }
 });
 // ==========================================
