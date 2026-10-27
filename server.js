@@ -349,7 +349,7 @@ app.delete('/api/appointments/:id', verifyToken, async (req, res) => {
 app.get('/api/lab-reports', verifyToken, async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT l.id, l.patient_id AS "patientId", p.name AS "patientName", l.test_name AS "testName", l.status, l.result, TO_CHAR(l.reported_date, 'YYYY-MM-DD') AS "reported" 
+      SELECT l.id, l.patient_id AS "patientId", p.patient_name AS "patientName", l.test_name AS "testName", l.status, l.result, TO_CHAR(l.reported_date, 'YYYY-MM-DD') AS "reported" 
       FROM lab_records l 
       LEFT JOIN patients p ON l.patient_id = p.id 
       WHERE l.status = 'COMPLETED' 
@@ -360,7 +360,6 @@ app.get('/api/lab-reports', verifyToken, async (req, res) => {
     res.status(500).json([]);
   }
 });
-
 app.put('/api/lab-reports/:id', verifyToken, async (req, res) => {
   const { result, status } = req.body;
   try {
@@ -380,7 +379,7 @@ app.put('/api/lab-reports/:id', verifyToken, async (req, res) => {
 app.get('/api/lab-orders', verifyToken, async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT l.id, l.patient_id AS "patientId", p.name AS "patientName", l.test_name AS "testName", l.status, l.result, TO_CHAR(l.reported_date, 'YYYY-MM-DD') AS "reported" 
+      SELECT l.id, l.patient_id AS "patientId", p.patient_name AS "patientName", l.test_name AS "testName", l.status, l.result, TO_CHAR(l.reported_date, 'YYYY-MM-DD') AS "reported" 
       FROM lab_records l 
       LEFT JOIN patients p ON l.patient_id = p.id 
       WHERE l.status != 'COMPLETED' 
@@ -487,7 +486,7 @@ app.post('/api/inventory', verifyToken, async (req, res) => {
 app.get('/api/invoices', verifyToken, async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT i.id, i.patient_id AS "patientId", p.name AS "patientName", i.services, i.subtotal, i.gst AS "gstAmount", i.total_amount AS "totalAmount", i.status, TO_CHAR(i.invoice_date, 'YYYY-MM-DD') AS "date" 
+      SELECT i.id, i.patient_id AS "patientId", p.patient_name AS "patientName", i.services, i.subtotal, i.gst AS "gstAmount", i.total_amount AS "totalAmount", i.status, TO_CHAR(i.invoice_date, 'YYYY-MM-DD') AS "date" 
       FROM invoices i 
       LEFT JOIN patients p ON i.patient_id = p.id 
       ORDER BY i.invoice_date DESC
