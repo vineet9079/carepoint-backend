@@ -360,6 +360,22 @@ app.get('/api/lab-reports', verifyToken, async (req, res) => {
     res.status(500).json([]);
   }
 });
+
+app.put('/api/lab-reports/:id', verifyToken, async (req, res) => {
+  const { result, status } = req.body;
+  try {
+    const query = `
+      UPDATE lab_records 
+      SET result = $1, status = $2, reported_date = CURRENT_TIMESTAMP 
+      WHERE id = $3 RETURNING *;
+    `;
+    const updated = await db.query(query, [result, status || 'COMPLETED', req.params.id]);
+    res.json(updated.rows[0]);
+  } catch (err) {
+    console.error("Lab report update error:", err);
+    res.status(500).json({ error: 'Failed to save report' });
+  }
+});
 // --- LAB ORDERS ---
 app.get('/api/lab-orders', verifyToken, async (req, res) => {
   try {
@@ -470,10 +486,15 @@ app.post('/api/inventory', verifyToken, async (req, res) => {
 // --- INVOICES ---
 app.get('/api/invoices', verifyToken, async (req, res) => {
   try {
-    // FIX: Added TO_CHAR(invoice_date, 'YYYY-MM-DD') to clean up invoice dates
-    const result = await db.query(`SELECT id, patient_id AS "patientId", patient_name AS "patientName", services, subtotal, gst AS "gstAmount", total_amount AS "totalAmount", status, TO_CHAR(invoice_date, 'YYYY-MM-DD') AS "date" FROM invoices ORDER BY invoice_date DESC`);
+    const result = await db.query(`
+      SELECT i.id, i.patient_id AS "patientId", p.name AS "patientName", i.services, i.subtotal, i.gst AS "gstAmount", i.total_amount AS "totalAmount", i.status, TO_CHAR(i.invoice_date, 'YYYY-MM-DD') AS "date" 
+      FROM invoices i 
+      LEFT JOIN patients p ON i.patient_id = p.id 
+      ORDER BY i.invoice_date DESC
+    `);
     res.json(result.rows);
   } catch (err) {
+    console.error("Invoices fetch error:", err);
     res.status(500).json([]);
   }
 });
