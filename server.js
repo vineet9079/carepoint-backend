@@ -260,7 +260,7 @@ const verifyToken = async (req, res, next) => {
 // --- PATIENTS ---
 app.get('/api/patients', verifyToken, async (req, res) => {
   try {
-    const result = await db.query('SELECT * FROM patients ORDER BY created_at DESC');
+    const result = await db.query('SELECT id, name, email, phone, dob, age, gender, blood_group AS "bloodGroup", inits, color, created_at FROM patients ORDER BY created_at DESC');
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
@@ -278,7 +278,12 @@ app.post('/api/patients', async (req, res) => {
         blood_group = EXCLUDED.blood_group, gender = EXCLUDED.gender
       RETURNING *;
     `;
-    const result = await db.query(query, [id, name, email, phone, dob || null, age || 25, gender || 'Other', bloodGroup || 'O+', inits || 'PT', color || 'bg-blue-500']);
+    // Prevent database crash by enforcing length limits before saving
+    const safeGender = (gender || 'Other').substring(0, 10);
+    const safeBloodGroup = (bloodGroup || 'O+').substring(0, 10);
+    const safePhone = (phone || '').substring(0, 20);
+
+    const result = await db.query(query, [id, name, email, safePhone, dob || null, age || 25, safeGender, safeBloodGroup, inits || 'PT', color || 'bg-blue-500']);
     res.json({ success: true, patient: result.rows[0] });
   } catch (err) {
     console.error("Patient save error:", err);
@@ -289,7 +294,7 @@ app.post('/api/patients', async (req, res) => {
 // --- APPOINTMENTS ---
 app.get('/api/appointments', verifyToken, async (req, res) => {
   try {
-    const result = await db.query('SELECT * FROM appointments ORDER BY date DESC, time DESC');
+    const result = await db.query('SELECT id, patient_id AS "patientId", patient_name AS "patientName", doctor_id AS "doctorId", doctor_name AS "doctorName", date, time, reason, status FROM appointments ORDER BY date DESC, time DESC');
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
@@ -338,7 +343,7 @@ app.delete('/api/appointments/:id', verifyToken, async (req, res) => {
 // --- LAB REPORTS ---
 app.get('/api/lab-reports', verifyToken, async (req, res) => {
   try {
-    const result = await db.query("SELECT * FROM lab_records WHERE status = 'COMPLETED' ORDER BY reported_date DESC");
+    const result = await db.query(`SELECT id, patient_id AS "patientId", test_name AS "testName", status, result, reported_date AS "reported" FROM lab_records WHERE status = 'COMPLETED' ORDER BY reported_date DESC`);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
@@ -348,7 +353,7 @@ app.get('/api/lab-reports', verifyToken, async (req, res) => {
 // --- LAB ORDERS ---
 app.get('/api/lab-orders', verifyToken, async (req, res) => {
   try {
-    const result = await db.query("SELECT * FROM lab_records WHERE status != 'COMPLETED' ORDER BY id DESC");
+    const result = await db.query(`SELECT id, patient_id AS "patientId", test_name AS "testName", status, result, reported_date AS "reported" FROM lab_records WHERE status != 'COMPLETED' ORDER BY id DESC`);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
@@ -389,7 +394,7 @@ app.put('/api/lab-reports/:id', verifyToken, async (req, res) => {
 // --- PRESCRIPTIONS ---
 app.get('/api/prescriptions', verifyToken, async (req, res) => {
   try {
-    const result = await db.query('SELECT * FROM prescriptions ORDER BY created_at DESC');
+    const result = await db.query('SELECT id, patient_id AS "patientId", patient_name AS "patientName", diagnosis, medications, total_cost AS "totalCost", status, created_at FROM prescriptions ORDER BY created_at DESC');
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
@@ -425,7 +430,7 @@ app.put('/api/prescriptions/:id', verifyToken, async (req, res) => {
 // --- INVENTORY ---
 app.get('/api/inventory', verifyToken, async (req, res) => {
   try {
-    const result = await db.query('SELECT * FROM inventory ORDER BY name ASC');
+    const result = await db.query('SELECT id, name, batch, expiry, quantity, unit_price AS "unitPrice" FROM inventory ORDER BY name ASC');
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
@@ -451,7 +456,7 @@ app.post('/api/inventory', verifyToken, async (req, res) => {
 // --- INVOICES ---
 app.get('/api/invoices', verifyToken, async (req, res) => {
   try {
-    const result = await db.query('SELECT * FROM invoices ORDER BY invoice_date DESC');
+    const result = await db.query('SELECT id, patient_id AS "patientId", patient_name AS "patientName", services, subtotal, gst AS "gstAmount", total_amount AS "totalAmount", status, invoice_date AS "date" FROM invoices ORDER BY invoice_date DESC');
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
@@ -483,7 +488,6 @@ app.put('/api/invoices/:id', verifyToken, async (req, res) => {
     res.status(500).json({ error: 'Invoice update failed' });
   }
 });
-
 // ==========================================
 // AI CHATBOT ENDPOINT (GROQ GPT-OSS-20B)
 // ==========================================
