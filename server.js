@@ -260,13 +260,13 @@ const verifyToken = async (req, res, next) => {
 // --- PATIENTS ---
 app.get('/api/patients', verifyToken, async (req, res) => {
   try {
-    const result = await db.query('SELECT id, name, email, phone, dob, age, gender, blood_group AS "bloodGroup", inits, color, created_at FROM patients ORDER BY created_at DESC');
+    // FIX: Added TO_CHAR to format the Date of Birth perfectly
+    const result = await db.query(`SELECT id, name, email, phone, TO_CHAR(dob, 'YYYY-MM-DD') AS dob, age, gender, blood_group AS "bloodGroup", inits, color, created_at FROM patients ORDER BY created_at DESC`);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
   }
 });
-
 app.post('/api/patients', verifyToken, async (req, res) => {
   const { id, name, email, phone, dob, age, gender, bloodGroup, inits, color } = req.body;
   try {
