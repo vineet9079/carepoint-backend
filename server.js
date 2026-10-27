@@ -319,18 +319,23 @@ app.post('/api/appointments', async (req, res) => {
 });
 
 app.put('/api/appointments/:id', verifyToken, async (req, res) => {
-  const { status, time } = req.body;
+  const { status, time, date, doctorId, doctorName } = req.body;
   try {
     const result = await db.query(
-      'UPDATE appointments SET status = COALESCE($1, status), time = COALESCE($2, time) WHERE id = $3 RETURNING *',
-      [status, time, req.params.id]
+      `UPDATE appointments 
+       SET status = COALESCE($1, status), 
+           time = COALESCE($2, time), 
+           date = COALESCE($3, date), 
+           doctor_id = COALESCE($4, doctor_id), 
+           doctor_name = COALESCE($5, doctor_name) 
+       WHERE id = $6 RETURNING *`,
+      [status, time, date, doctorId, doctorName, req.params.id]
     );
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: 'Update failed' });
   }
 });
-
 app.delete('/api/appointments/:id', verifyToken, async (req, res) => {
   try {
     await db.query('DELETE FROM appointments WHERE id = $1', [req.params.id]);
