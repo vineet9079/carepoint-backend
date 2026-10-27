@@ -294,13 +294,13 @@ app.post('/api/patients', async (req, res) => {
 // --- APPOINTMENTS ---
 app.get('/api/appointments', verifyToken, async (req, res) => {
   try {
-    const result = await db.query('SELECT id, patient_id AS "patientId", patient_name AS "patientName", doctor_id AS "doctorId", doctor_name AS "doctorName", date, time, reason, status FROM appointments ORDER BY date DESC, time DESC');
+    // FIX: Added TO_CHAR(date, 'YYYY-MM-DD') to strip the unwanted timestamp
+    const result = await db.query(`SELECT id, patient_id AS "patientId", patient_name AS "patientName", doctor_id AS "doctorId", doctor_name AS "doctorName", TO_CHAR(date, 'YYYY-MM-DD') AS date, time, reason, status FROM appointments ORDER BY date DESC, time DESC`);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
   }
 });
-
 app.post('/api/appointments', async (req, res) => {
   const { id, patientId, patientName, doctorId, doctorName, date, time, reason, status } = req.body;
   try {
@@ -456,13 +456,13 @@ app.post('/api/inventory', verifyToken, async (req, res) => {
 // --- INVOICES ---
 app.get('/api/invoices', verifyToken, async (req, res) => {
   try {
-    const result = await db.query('SELECT id, patient_id AS "patientId", patient_name AS "patientName", services, subtotal, gst AS "gstAmount", total_amount AS "totalAmount", status, invoice_date AS "date" FROM invoices ORDER BY invoice_date DESC');
+    // FIX: Added TO_CHAR(invoice_date, 'YYYY-MM-DD') to clean up invoice dates
+    const result = await db.query(`SELECT id, patient_id AS "patientId", patient_name AS "patientName", services, subtotal, gst AS "gstAmount", total_amount AS "totalAmount", status, TO_CHAR(invoice_date, 'YYYY-MM-DD') AS "date" FROM invoices ORDER BY invoice_date DESC`);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
   }
 });
-
 app.post('/api/invoices', verifyToken, async (req, res) => {
   const { id, patientId, patientName, services, subtotal, gst, totalAmount, status } = req.body;
   try {
