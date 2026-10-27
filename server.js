@@ -267,7 +267,7 @@ app.get('/api/patients', verifyToken, async (req, res) => {
   }
 });
 
-app.post('/api/patients', async (req, res) => {
+app.post('/api/patients', verifyToken, async (req, res) => {
   const { id, name, email, phone, dob, age, gender, bloodGroup, inits, color } = req.body;
   try {
     const query = `
@@ -278,9 +278,9 @@ app.post('/api/patients', async (req, res) => {
         blood_group = EXCLUDED.blood_group, gender = EXCLUDED.gender
       RETURNING *;
     `;
-    // Prevent database crash by enforcing length limits before saving
-    const safeGender = (gender || 'Other').substring(0, 10);
-    const safeBloodGroup = (bloodGroup || 'O+').substring(0, 10);
+    // FIX: Increased substring limits to 50 so "Not specified" doesn't get cut off
+    const safeGender = (gender || 'Other').substring(0, 50);
+    const safeBloodGroup = (bloodGroup || 'O+').substring(0, 50);
     const safePhone = (phone || '').substring(0, 20);
 
     const result = await db.query(query, [id, name, email, safePhone, dob || null, age || 25, safeGender, safeBloodGroup, inits || 'PT', color || 'bg-blue-500']);
@@ -290,7 +290,6 @@ app.post('/api/patients', async (req, res) => {
     res.status(500).json({ error: 'Failed to save patient' });
   }
 });
-
 // --- APPOINTMENTS ---
 app.get('/api/appointments', verifyToken, async (req, res) => {
   try {
@@ -301,7 +300,7 @@ app.get('/api/appointments', verifyToken, async (req, res) => {
     res.status(500).json([]);
   }
 });
-app.post('/api/appointments', async (req, res) => {
+app.post('/api/appointments', verifyToken, async (req, res) => {
   const { id, patientId, patientName, doctorId, doctorName, date, time, reason, status } = req.body;
   try {
     const query = `
@@ -344,14 +343,18 @@ app.delete('/api/appointments/:id', verifyToken, async (req, res) => {
     res.status(500).json({ error: 'Deletion failed' });
   }
 });
-
 // --- LAB REPORTS ---
 app.get('/api/lab-reports', verifyToken, async (req, res) => {
   try {
-    const result = await db.query(`SELECT id, patient_id AS "patientId", test_name AS "testName", status, result, TO_CHAR(reported_date, 'YYYY-MM-DD') AS "reported" FROM lab_records WHERE status = 'COMPLETED' ORDER BY reported_date DESC`);
+    const result = await db.query(`
+      SELECT l.id, l.patient_id AS "patientId", p.name AS "patientName", l.test_name AS "testName", l.status, l.result, TO_CHAR(l.reported_date, 'YYYY-MM-DD') AS "reported" 
+      FROM lab_records l 
+      LEFT JOIN patients p ON l.patient_id = p.id 
+      WHERE l.status = 'COMPLETED' 
+      ORDER BY l.reported_date DESC
+    `);
     res.json(result.rows);
   } catch (err) {
-    console.error("Lab reports error:", err);
     res.status(500).json([]);
   }
 });
@@ -373,14 +376,19 @@ app.put('/api/lab-reports/:id', verifyToken, async (req, res) => {
 // --- LAB ORDERS ---
 app.get('/api/lab-orders', verifyToken, async (req, res) => {
   try {
-    const result = await db.query(`SELECT id, patient_id AS "patientId", test_name AS "testName", status, result, TO_CHAR(reported_date, 'YYYY-MM-DD') AS "reported" FROM lab_records WHERE status != 'COMPLETED' ORDER BY id DESC`);
+    const result = await db.query(`
+      SELECT l.id, l.patient_id AS "patientId", p.name AS "patientName", l.test_name AS "testName", l.status, l.result, TO_CHAR(l.reported_date, 'YYYY-MM-DD') AS "reported" 
+      FROM lab_records l 
+      LEFT JOIN patients p ON l.patient_id = p.id 
+      WHERE l.status != 'COMPLETED' 
+      ORDER BY l.id DESC
+    `);
     res.json(result.rows);
   } catch (err) {
-    console.error("Lab orders error:", err);
     res.status(500).json([]);
   }
 });
-app.post('/api/lab-orders', async (req, res) => {
+app.post('/api/lab-orders', verifyToken, async (req, res) => {
   // ... (keep this existing POST route exactly as it is) ...
   const { id, patientId, testName, status } = req.body;
   try {
@@ -471,24 +479,26 @@ app.post('/api/inventory', verifyToken, async (req, res) => {
     res.status(500).json({ error: 'Failed to save inventory item' });
   }
 });
-
 // --- INVOICES ---
 app.get('/api/invoices', verifyToken, async (req, res) => {
   try {
-    const result = await db.query(`SELECT id, patient_id AS "patientId", patient_name AS "patientName", services, subtotal, gst AS "gstAmount", total_amount AS "totalAmount", status, TO_CHAR(invoice_date, 'YYYY-MM-DD') AS "date" FROM invoices ORDER BY invoice_date DESC`);
+    const result = await db.query(`
+      SELECT i.id, i.patient_id AS "patientId", p.name AS "patientName", i.services, i.subtotal, i.gst AS "gstAmount", i.total_amount AS "totalAmount", i.status, TO_CHAR(i.invoice_date, 'YYYY-MM-DD') AS "date" 
+      FROM invoices i 
+      LEFT JOIN patients p ON i.patient_id = p.id 
+      ORDER BY i.invoice_date DESC
+    `);
     res.json(result.rows);
   } catch (err) {
-    console.error("Invoices error:", err);
     res.status(500).json([]);
   }
 });
 app.post('/api/invoices', verifyToken, async (req, res) => {
-  // FIX: Read 'gstAmount' and 'date' correctly from the frontend
   const { id, patientId, patientName, services, subtotal, gstAmount, totalAmount, status, date } = req.body;
   try {
     const query = `
       INSERT INTO invoices (id, patient_id, patient_name, services, subtotal, gst, total_amount, status, invoice_date) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, CURRENT_DATE)) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE(NULLIF($9, ''), CURRENT_DATE)) 
       ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status
       RETURNING *;
     `;
