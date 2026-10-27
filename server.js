@@ -348,23 +348,33 @@ app.delete('/api/appointments/:id', verifyToken, async (req, res) => {
 // --- LAB REPORTS ---
 app.get('/api/lab-reports', verifyToken, async (req, res) => {
   try {
-    const result = await db.query(`SELECT id, patient_id AS "patientId", test_name AS "testName", status, result, reported_date AS "reported" FROM lab_records WHERE status = 'COMPLETED' ORDER BY reported_date DESC`);
+    const result = await db.query(`
+      SELECT l.id, l.patient_id AS "patientId", p.name AS "patientName", l.test_name AS "testName", l.status, l.result, TO_CHAR(l.reported_date, 'YYYY-MM-DD') AS "reported" 
+      FROM lab_records l 
+      LEFT JOIN patients p ON l.patient_id = p.id 
+      WHERE l.status = 'COMPLETED' 
+      ORDER BY l.reported_date DESC
+    `);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
   }
 });
-
 // --- LAB ORDERS ---
 app.get('/api/lab-orders', verifyToken, async (req, res) => {
   try {
-    const result = await db.query(`SELECT id, patient_id AS "patientId", test_name AS "testName", status, result, reported_date AS "reported" FROM lab_records WHERE status != 'COMPLETED' ORDER BY id DESC`);
+    const result = await db.query(`
+      SELECT l.id, l.patient_id AS "patientId", p.name AS "patientName", l.test_name AS "testName", l.status, l.result, TO_CHAR(l.reported_date, 'YYYY-MM-DD') AS "reported" 
+      FROM lab_records l 
+      LEFT JOIN patients p ON l.patient_id = p.id 
+      WHERE l.status != 'COMPLETED' 
+      ORDER BY l.id DESC
+    `);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json([]);
   }
 });
-
 app.post('/api/lab-orders', async (req, res) => {
   // ... (keep this existing POST route exactly as it is) ...
   const { id, patientId, testName, status } = req.body;
