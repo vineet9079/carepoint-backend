@@ -366,6 +366,7 @@ app.get('/api/lab-orders', verifyToken, async (req, res) => {
 });
 
 app.post('/api/lab-orders', async (req, res) => {
+  // ... (keep this existing POST route exactly as it is) ...
   const { id, patientId, testName, status } = req.body;
   try {
     const query = `
@@ -381,21 +382,19 @@ app.post('/api/lab-orders', async (req, res) => {
   }
 });
 
-app.put('/api/lab-reports/:id', verifyToken, async (req, res) => {
-  const { result, status } = req.body;
+// ADD THIS MISSING ROUTE HERE:
+app.put('/api/lab-orders/:id', verifyToken, async (req, res) => {
+  const { status } = req.body;
   try {
-    const query = `
-      UPDATE lab_records 
-      SET result = $1, status = $2, reported_date = CURRENT_TIMESTAMP 
-      WHERE id = $3 RETURNING *;
-    `;
-    const updated = await db.query(query, [result, status || 'COMPLETED', req.params.id]);
-    res.json(updated.rows[0]);
+    const result = await db.query(
+      'UPDATE lab_records SET status = $1 WHERE id = $2 RETURNING *', 
+      [status, req.params.id]
+    );
+    res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to save report' });
+    res.status(500).json({ error: 'Failed to update lab order' });
   }
 });
-
 // --- PRESCRIPTIONS ---
 app.get('/api/prescriptions', verifyToken, async (req, res) => {
   try {
