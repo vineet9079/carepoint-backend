@@ -501,16 +501,23 @@ app.get('/api/invoices', verifyToken, async (req, res) => {
     res.status(500).json([]);
   }
 });
+// ==========================================
+// INVOICES - FIXED SQL ROUTE
+// ==========================================
 app.post('/api/invoices', verifyToken, async (req, res) => {
   const { id, patientId, patientName, services, subtotal, gstAmount, totalAmount, status, date } = req.body;
   try {
+    // FIX: Removed the COALESCE function that caused the Postgres type mismatch crash
     const query = `
       INSERT INTO invoices (id, patient_id, patient_name, services, subtotal, gst, total_amount, status, invoice_date) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE(NULLIF($9, ''), CURRENT_DATE)) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
       ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status
       RETURNING *;
     `;
-    const result = await db.query(query, [id, patientId, patientName, services, subtotal, gstAmount || 0, totalAmount, status || 'PENDING', date]);
+    // Safely assign the date in JavaScript to guarantee it formats correctly
+    const safeDate = date || new Date().toISOString().split('T')[0];
+    
+    const result = await db.query(query, [id, patientId, patientName, services, subtotal, gstAmount || 0, totalAmount, status || 'PENDING', safeDate]);
     res.json(result.rows[0]);
   } catch (err) {
     console.error("Invoice save error:", err);
