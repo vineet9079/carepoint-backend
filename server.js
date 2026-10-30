@@ -1,6 +1,9 @@
 require('dotenv').config();
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'carepoint_super_secret_key_2026';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  throw new Error('JWT_SECRET must be configured with at least 32 characters.');
+}
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -108,78 +111,40 @@ app.post('/api/auth/send-otp', async (req, res) => {
   }
 });
 
-// ==========================================
-// SECURE EMAIL NOTIFICATIONS (HTTPS BYPASS)
-// ==========================================
-app.post('/api/notify/email', async (req, res) => {
-  const { email, subject, htmlMessage } = req.body;
-  if (!email || !htmlMessage) return res.status(400).json({ error: 'Email and message required.' });
+// EMAIL NOTIFICATION ROUTE IS REGISTERED AFTER verifyToken IS DEFINED.
 
-  try {
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: process.env.CLIENT_ID,
-        client_secret: process.env.CLIENT_SECRET,
-        refresh_token: process.env.REFRESH_TOKEN,
-        grant_type: 'refresh_token'
-      })
-    });
-    const tokenData = await tokenResponse.json();
-    if (!tokenData.access_token) {
-      console.error("OAuth Token Error:", tokenData);
-      return res.status(500).json({ error: 'Failed to obtain access token from Google.' });
-    }
-    
-    const emailContent = [
-      `To: ${email}`,
-      `From: "CarePoint HMS" <${process.env.EMAIL_USER}>`,
-      `Subject: ${subject}`,
-      `Content-Type: text/html; charset=utf-8`,
-      '',
-      htmlMessage
-    ].join('\r\n');
-
-    const base64EncodedEmail = Buffer.from(emailContent)
-      .toString('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
-
-    const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-      method: 'POST',
-      headers: { 
-        'Authorization': `Bearer ${tokenData.access_token}`, 
-        'Content-Type': 'application/json' 
-      },
-      body: JSON.stringify({ raw: base64EncodedEmail })
-    });
-
-    if (!sendResponse.ok) {
-      const errText = await sendResponse.text();
-      console.error("Gmail API Send Failure:", errText);
-      return res.status(500).json({ error: errText });
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error("Email Dispatch Crash:", error);
-    res.status(500).json({ error: 'Failed to send notification.' });
-  }
-});
 // ==========================================
 // GENERATE SECURE PATIENT TOKEN
 // ==========================================
 app.post('/api/auth/patient-token', async (req, res) => {
-  const { email } = req.body;
+  const identity = String(req.body?.email || '').trim();
+  if (!identity) {
+    return res.status(400).json({ success: false, error: 'Email or phone is required.' });
+  }
+
   try {
-    const token = jwt.sign({ id: email, role: 'patient' }, JWT_SECRET, { expiresIn: '7d' });
-    const result = await db.query('SELECT * FROM patients WHERE email = $1 OR phone = $1', [email]);
-    const patient = result.rows.length > 0 ? result.rows[0] : null;
-    res.json({ success: true, token, patient });
+    const result = await db.query(
+      `SELECT * FROM patients
+       WHERE LOWER(email) = LOWER($1) OR phone = $1
+       LIMIT 1`,
+      [identity]
+    );
+
+    const patient = result.rows[0] || null;
+    const normalizedEmail = patient?.email || (
+      identity.includes('@') ? identity.toLowerCase() : null
+    );
+    const token = jwt.sign(
+      { id: patient?.id || null, email: normalizedEmail, role: 'patient' },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Keep the existing OTP -> profile-registration flow working for new patients.
+    return res.json({ success: true, token, patient });
   } catch (err) {
-    res.status(500).json({ error: 'Server error generating token' });
+    console.error('Patient token generation error:', err.message);
+    return res.status(500).json({ success: false, error: 'Server error generating token.' });
   }
 });
 
@@ -260,9 +225,11 @@ app.put('/api/staff/change-password', async (req, res) => {
 // ==========================================
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  if (!authHeader) return res.status(401).json({ error: 'Access denied.', forceLogout: true });
+  if (!authHeader || !/^Bearer\s+\S+$/i.test(authHeader)) {
+    return res.status(401).json({ error: 'Access denied.', forceLogout: true });
+  }
 
-  const token = authHeader.split(' ')[1];
+  const token = authHeader.split(/\s+/)[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     if(decoded.role !== 'patient') {
@@ -277,7 +244,131 @@ const verifyToken = async (req, res, next) => {
   } catch (err) {
     return res.status(401).json({ error: 'Invalid token.', forceLogout: true });
   }
-};
+ };
+
+// ==========================================
+// SECURE EMAIL NOTIFICATIONS
+// ==========================================
+// Requires a valid staff or patient JWT.
+// Staff may notify an address belonging to a registered patient.
+// A patient token may only send to that patient's own registered email.
+app.post('/api/notify/email', verifyToken, async (req, res) => {
+  const { email, subject, htmlMessage } = req.body || {};
+  const recipient = String(email || '').trim().toLowerCase();
+  const cleanSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim();
+
+  if (!recipient || !cleanSubject || !htmlMessage) {
+    return res.status(400).json({ success: false, error: 'Email, subject and message are required.' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+    return res.status(400).json({ success: false, error: 'A valid recipient email is required.' });
+  }
+  if (String(htmlMessage).length > 100000) {
+    return res.status(413).json({ success: false, error: 'Email message is too large.' });
+  }
+
+  try {
+    const role = String(req.user?.role || '').toLowerCase();
+    const patientResult = await db.query(
+      'SELECT id, name, email FROM patients WHERE LOWER(email) = $1 LIMIT 1',
+      [recipient]
+    );
+    if (patientResult.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'No registered patient is associated with this email address.' });
+    }
+
+    if (role === 'patient') {
+      const tokenPatientId = req.user?.id ? String(req.user.id) : '';
+      const tokenEmail = String(req.user?.email || '').trim().toLowerCase();
+      const authenticatedPatient = tokenPatientId
+        ? await db.query('SELECT id, email FROM patients WHERE id = $1 LIMIT 1', [tokenPatientId])
+        : await db.query('SELECT id, email FROM patients WHERE LOWER(email) = $1 LIMIT 1', [tokenEmail]);
+
+      if (
+        authenticatedPatient.rowCount === 0 ||
+        String(authenticatedPatient.rows[0].email || '').trim().toLowerCase() !== recipient ||
+        tokenEmail !== recipient ||
+        (tokenPatientId && String(authenticatedPatient.rows[0].id) !== tokenPatientId)
+      ) {
+        return res.status(403).json({ success: false, error: 'Patient accounts can only send notifications to their own registered email.' });
+      }
+    } else if (!req.user?.id) {
+      return res.status(403).json({ success: false, error: 'A valid staff account is required.' });
+    }
+
+    const requiredEnv = ['CLIENT_ID', 'CLIENT_SECRET', 'REFRESH_TOKEN', 'EMAIL_USER'];
+    const missingEnv = requiredEnv.filter(key => !process.env[key]);
+    if (missingEnv.length) {
+      console.error('Email configuration missing:', missingEnv.join(', '));
+      return res.status(503).json({ success: false, error: 'Email service is not configured on the server.' });
+    }
+
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.CLIENT_ID,
+        client_secret: process.env.CLIENT_SECRET,
+        refresh_token: process.env.REFRESH_TOKEN,
+        grant_type: 'refresh_token'
+      })
+    });
+    const tokenData = await tokenResponse.json().catch(() => ({}));
+    if (!tokenResponse.ok || !tokenData.access_token) {
+      console.error('Google OAuth refresh failed:', tokenResponse.status, tokenData.error || 'No access token');
+      return res.status(502).json({ success: false, error: 'Google authentication failed. Check the Gmail OAuth refresh token and permissions.' });
+    }
+
+    const senderEmail = String(process.env.EMAIL_USER || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(senderEmail)) {
+      console.error('Email configuration invalid: EMAIL_USER');
+      return res.status(503).json({ success: false, error: 'Email service is not configured correctly on the server.' });
+    }
+
+    const encodedSubject = `=?UTF-8?B?${Buffer.from(cleanSubject, 'utf8').toString('base64')}?=`;
+    const safeHtml = String(htmlMessage);
+    const mimeMessage = [
+      `To: ${recipient}`,
+      `From: "CarePoint HMS" <${senderEmail}>`,
+      `Subject: ${encodedSubject}`,
+      'MIME-Version: 1.0',
+      'Content-Type: text/html; charset=utf-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      safeHtml
+    ].join('\r\n');
+
+    const raw = Buffer.from(mimeMessage, 'utf8')
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tokenData.access_token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ raw })
+    });
+    const sendData = await sendResponse.json().catch(() => ({}));
+    if (!sendResponse.ok) {
+      console.error('Gmail API send failed:', sendResponse.status, sendData.error?.message || 'Unknown Gmail API error');
+      return res.status(502).json({ success: false, error: 'Gmail could not send the notification.', details: sendData.error?.message || undefined });
+    }
+
+    console.log('CarePoint email dispatched:', {
+      patientId: patientResult.rows[0].id,
+      messageId: sendData.id || null,
+      type: role
+    });
+    return res.json({ success: true, message: 'Notification email dispatched.', messageId: sendData.id || null });
+  } catch (error) {
+    console.error('Email dispatch error:', error.message);
+    return res.status(500).json({ success: false, error: 'Failed to dispatch notification email.' });
+  }
+});
 
 // ==========================================
 // CLINICAL MODULES API (Relational Tables)
