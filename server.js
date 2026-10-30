@@ -131,17 +131,24 @@ app.post('/api/notify/email', async (req, res) => {
     const emailContent = [`To: ${email}`, `From: "CarePoint HMS" <${process.env.EMAIL_USER}>`, `Subject: ${subject}`, `Content-Type: text/html; charset=utf-8`, '', htmlMessage].join('\r\n');
     const base64EncodedEmail = Buffer.from(emailContent).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-    await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ raw: base64EncodedEmail })
     });
+
+    if (!sendRes.ok) {
+      const errorText = await sendRes.text();
+      console.error("Gmail API Send Error:", errorText);
+      return res.status(500).json({ error: errorText });
+    }
+
     res.json({ success: true });
   } catch (error) {
+    console.error("Email Route Crash:", error);
     res.status(500).json({ error: 'Failed to send notification.' });
   }
 });
-
 // ==========================================
 // GENERATE SECURE PATIENT TOKEN
 // ==========================================
