@@ -290,6 +290,15 @@ app.post('/api/patients', verifyToken, async (req, res) => {
     res.status(500).json({ error: 'Failed to save patient' });
   }
 });
+// --- DELETE PATIENT ---
+app.delete('/api/patients/:id', verifyToken, async (req, res) => {
+  try {
+    await db.query('DELETE FROM patients WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Deletion failed' });
+  }
+});
 // --- APPOINTMENTS ---
 app.get('/api/appointments', verifyToken, async (req, res) => {
   try {
@@ -483,10 +492,9 @@ app.post('/api/inventory', verifyToken, async (req, res) => {
 app.get('/api/invoices', verifyToken, async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT i.id, i.patient_id AS "patientId", p.name AS "patientName", i.services, i.subtotal, i.gst AS "gstAmount", i.total_amount AS "totalAmount", i.status, TO_CHAR(i.invoice_date, 'YYYY-MM-DD') AS "date" 
-      FROM invoices i 
-      LEFT JOIN patients p ON i.patient_id = p.id 
-      ORDER BY i.invoice_date DESC
+      SELECT id, patient_id AS "patientId", patient_name AS "patientName", services, subtotal, gst AS "gstAmount", total_amount AS "totalAmount", status, TO_CHAR(invoice_date, 'YYYY-MM-DD') AS "date" 
+      FROM invoices 
+      ORDER BY invoice_date DESC
     `);
     res.json(result.rows);
   } catch (err) {
