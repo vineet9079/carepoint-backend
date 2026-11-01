@@ -330,7 +330,16 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
       const logResult = await db.query(
         `INSERT INTO email_dispatch_logs (patient_id, recipient_email, subject, notification_type, status)
          VALUES ($1, $2, $3, $4, 'PENDING') RETURNING id`,
-        [patient.id, recipient, cleanSubject, cleanSubject.toLowerCase().includes('payment') ? 'PAYMENT' : 'GENERAL']
+        [
+          patient.id,
+          recipient,
+          cleanSubject,
+          /payment due/i.test(cleanSubject) ? 'DUE' :
+          /payment confirmation/i.test(cleanSubject) ? 'PAYMENT' :
+          /invoice generated/i.test(cleanSubject) ? 'INVOICE' :
+          /medical order received/i.test(cleanSubject) ? 'ORDER' :
+          /lab report available/i.test(cleanSubject) ? 'REPORT' : 'GENERAL'
+        ]
       );
       dispatchLogId = logResult.rows[0]?.id || null;
     } catch (logError) {
