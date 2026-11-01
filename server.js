@@ -11,6 +11,97 @@ const bcrypt = require('bcryptjs');
 const { OpenAI } = require('openai');
 
 const app = express();
+
+// ==========================================
+// EMAIL FORMATTING HELPERS
+// ==========================================
+const crypto = require('crypto');
+
+// Repair Markdown-style links accidentally placed inside HTML href attributes.
+function repairEmailLinks(html) {
+  return String(html || '').replace(
+    /href=(['"] )?\[?(https?:\/\/[^\]\s)"']+)\]?\((https?:\/\/[^)\s"']+)\)\1/gi,
+    (match, quote, displayedUrl, targetUrl) => `href="${(targetUrl || displayedUrl).replace(/&amp;/g, '&')}"`
+  ).replace(
+    /href=(['"])\[(https?:\/\/[^\]\s]+)\]\((https?:\/\/[^)\s]+)\)\1/gi,
+    (match, quote, displayedUrl, targetUrl) => `href="${(targetUrl || displayedUrl).replace(/&amp;/g, '&')}"`
+  );
+}
+
+// Convert HTML into readable plain text and retain the destinations of links.
+function htmlToPlainText(html) {
+  return String(html || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+      (match, url, label) => `${label.replace(/<[^>]*>/g, '').trim()} (${url})`)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h1|h2|h3|li)>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function base64MimePart(value) {
+  return Buffer.from(String(value), 'utf8')
+    .toString('base64')
+    .match(/.{1,76}/g)
+    ?.join('\r\n') || '';
+}
+
+// Build a standards-compliant plain-text + HTML email for Gmail API.
+function buildGmailRawMessage({ to, from, subject, html }) {
+  const cleanTo = String(to || '').replace(/[\r\n]+/g, '').trim();
+  const cleanFrom = String(from || '').replace(/[\r\n]+/g, '').trim();
+  const cleanSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim();
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanTo) ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanFrom)) {
+    throw new Error('Invalid email address in message headers.');
+  }
+
+  const repairedHtml = repairEmailLinks(html);
+  const plainText = htmlToPlainText(repairedHtml) || 'Please view this message in an HTML-capable email client.';
+  const boundary = `carepoint_${crypto.randomBytes(16).toString('hex')}`;
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(cleanSubject, 'utf8').toString('base64')}?=`;
+
+  const mimeMessage = [
+    `To: ${cleanTo}`,
+    `From: "CarePoint HMS" <${cleanFrom}>`,
+    `Subject: ${encodedSubject}`,
+    `Date: ${new Date().toUTCString()}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    base64MimePart(plainText),
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    base64MimePart(repairedHtml),
+    '',
+    `--${boundary}--`,
+    ''
+  ].join('\r\n');
+
+  return Buffer.from(mimeMessage, 'utf8').toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
 app.use(cors());
 app.use(express.json({ limit: '256kb' }));
 
@@ -88,23 +179,34 @@ app.post('/api/auth/send-otp', async (req, res) => {
     });
 
     const tokenData = await tokenResponse.json();
-    if (!tokenData.access_token) throw new Error('Failed to get access token');
+    if (!tokenResponse.ok || !tokenData.access_token) {
+      throw new Error(tokenData.error_description || tokenData.error || 'Failed to get access token');
+    }
 
-    const emailContent = [
-      `To: ${email}`,
-      `From: "CarePoint HMS" <${process.env.EMAIL_USER}>`,
-      `Subject: CarePoint HMS - Secure Login OTP`,
-      `Content-Type: text/html; charset=utf-8`,
-      '',
-      `<div style="text-align: center; font-family: Arial; padding: 20px;">`,
-      `  <h2 style="color: #4355B9;">CarePoint HMS</h2>`,
-      `  <p>Your secure login OTP is:</p>`,
-      `  <h1 style="letter-spacing: 5px;">${otp}</h1>`,
-      `</div>`
-    ].join('\r\n');
+    const safeOtp = String(otp).replace(/[&<>"']/g, char => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[char]));
 
-    const base64EncodedEmail = Buffer.from(emailContent)
-      .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const otpHtml = `
+      <div style="font-family:Arial,sans-serif;padding:20px;max-width:600px;margin:auto;">
+        <h2 style="color:#4355B9;">CarePoint HMS</h2>
+        <p>Your secure login verification code is:</p>
+        <h1 style="letter-spacing:5px;">${safeOtp}</h1>
+        <p>If you did not request this code, you can ignore this email.</p>
+        <p style="color:#777;font-size:12px;">Automated CarePoint notification.</p>
+      </div>
+    `;
+
+    const base64EncodedEmail = buildGmailRawMessage({
+      to: email,
+      from: process.env.EMAIL_USER,
+      subject: 'CarePoint HMS - Secure Login Verification Code',
+      html: otpHtml
+    });
 
     const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
@@ -115,6 +217,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
     if (!sendResponse.ok) throw new Error(await sendResponse.text());
     res.json({ success: true, message: 'OTP dispatched securely via Gmail HTTPS API.' });
   } catch (error) {
+    console.error('[OTP EMAIL] Dispatch failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to send OTP.' });
   }
 });
@@ -262,29 +365,14 @@ const verifyToken = async (req, res, next) => {
 app.post('/api/notify/email', verifyToken, async (req, res) => {
   const requestId = `mail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const { patientId, email, subject, htmlMessage } = req.body || {};
-  const allowedNotificationTypes = new Set(['ORDER', 'DUE', 'INVOICE', 'PAYMENT', 'REPORT', 'GENERAL']);
-  const suppliedNotificationType = String(req.body?.notificationType || '').trim().toUpperCase();
-  const inferredNotificationType =
-    /payment due/i.test(String(subject || '')) ? 'DUE' :
-    /payment confirmation/i.test(String(subject || '')) ? 'PAYMENT' :
-    /invoice generated/i.test(String(subject || '')) ? 'INVOICE' :
-    /medical order received/i.test(String(subject || '')) ? 'ORDER' :
-    /lab report available/i.test(String(subject || '')) ? 'REPORT' : 'GENERAL';
-  const notificationType = allowedNotificationTypes.has(suppliedNotificationType)
-    ? suppliedNotificationType
-    : inferredNotificationType;
   const requestedEmail = String(email || '').trim().toLowerCase();
   const cleanSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim();
-  if (suppliedNotificationType && allowedNotificationTypes.has(suppliedNotificationType) && suppliedNotificationType !== inferredNotificationType) {
-    console.warn('[EMAIL]', requestId, 'notification type/subject mismatch', { suppliedNotificationType, inferredNotificationType, subject: cleanSubject });
-  }
 
   console.log('[EMAIL]', requestId, 'request received', {
     actorRole: req.user?.role,
     patientId: patientId || null,
     hasEmail: Boolean(requestedEmail),
-    notificationType,
-    subject: cleanSubject,
+    hasSubject: Boolean(cleanSubject),
     htmlLength: typeof htmlMessage === 'string' ? htmlMessage.length : 0
   });
 
@@ -349,7 +437,11 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
           patient.id,
           recipient,
           cleanSubject,
-          notificationType
+          /payment due/i.test(cleanSubject) ? 'DUE' :
+          /payment confirmation/i.test(cleanSubject) ? 'PAYMENT' :
+          /invoice generated/i.test(cleanSubject) ? 'INVOICE' :
+          /medical order received/i.test(cleanSubject) ? 'ORDER' :
+          /lab report available/i.test(cleanSubject) ? 'REPORT' : 'GENERAL'
         ]
       );
       dispatchLogId = logResult.rows[0]?.id || null;
@@ -388,28 +480,18 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
       return res.status(503).json({ success: false, error: 'Email sender configuration is invalid.', requestId });
     }
 
-    const encodedSubject = `=?UTF-8?B?${Buffer.from(cleanSubject, 'utf8').toString('base64')}?=`;
-    const mimeMessage = [
-      `To: ${recipient}`,
-      `From: "CarePoint HMS" <${senderEmail}>`,
-      `Subject: ${encodedSubject}`,
-      'MIME-Version: 1.0',
-      'Content-Type: text/html; charset=utf-8',
-      'Content-Transfer-Encoding: 8bit',
-      '',
-      htmlMessage
-    ].join('\r\n');
+    const raw = buildGmailRawMessage({
+      to: recipient,
+      from: senderEmail,
+      subject: cleanSubject,
+      html: htmlMessage
+    });
 
-    // Gmail API raw messages require URL-safe base64 without '=' padding.
-    const raw = Buffer.from(mimeMessage, 'utf8').toString('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/g, '');
-    if (!raw || /[+/=\s]/.test(raw)) {
+    if (!raw || /[^A-Za-z0-9_-]/.test(raw)) {
       throw new Error('Gmail MIME raw payload failed base64url validation.');
     }
 
-    console.log('[EMAIL]', requestId, 'calling Gmail messages.send', { notificationType, subject: cleanSubject, recipient, rawLength: raw.length });
+    console.log('[EMAIL]', requestId, 'calling Gmail messages.send', { recipient, rawLength: raw.length });
     const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: {
@@ -443,12 +525,10 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
 
     console.log('[EMAIL]', requestId, 'Gmail accepted message', {
       patientId: patient.id,
-      notificationType,
-      subject: cleanSubject,
       messageId: sendData.id,
       threadId: sendData.threadId || null
     });
-    return res.json({ success: true, message: 'Notification email dispatched.', notificationType, subject: cleanSubject, messageId: sendData.id, requestId });
+    return res.json({ success: true, message: 'Notification email dispatched.', messageId: sendData.id, requestId });
   } catch (error) {
     console.error('[EMAIL]', requestId, 'dispatch exception:', error.stack || error.message || error);
     if (dispatchLogId) await db.query(
