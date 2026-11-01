@@ -12,12 +12,19 @@ const { OpenAI } = require('openai');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '256kb' }));
 
 // Database Connection (Neon DB)
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000
+});
+
+db.on('error', (error) => {
+  console.error('[DATABASE] Unexpected idle client error:', error);
 });
 
 // ==========================================
@@ -56,6 +63,7 @@ app.post('/api/auth/login', async (req, res) => {
       res.status(401).json({ success: false, error: 'Invalid username or password.' });
     }
   } catch (error) {
+    console.error('Staff login error:', error);
     res.status(500).json({ success: false, error: 'Server error during login' });
   }
 });
@@ -247,62 +255,89 @@ const verifyToken = async (req, res, next) => {
  };
 
 // ==========================================
-// SECURE EMAIL NOTIFICATIONS
+// SECURE EMAIL NOTIFICATIONS (GMAIL API)
 // ==========================================
-// Requires a valid staff or patient JWT.
-// Staff may notify an address belonging to a registered patient.
-// A patient token may only send to that patient's own registered email.
+// Staff may send to a registered patient's address. Patient JWTs are restricted
+// to the email address on that patient's own database record.
 app.post('/api/notify/email', verifyToken, async (req, res) => {
-  const { email, subject, htmlMessage } = req.body || {};
-  const recipient = String(email || '').trim().toLowerCase();
+  const requestId = `mail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const { patientId, email, subject, htmlMessage } = req.body || {};
+  const requestedEmail = String(email || '').trim().toLowerCase();
   const cleanSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim();
 
-  if (!recipient || !cleanSubject || !htmlMessage) {
-    return res.status(400).json({ success: false, error: 'Email, subject and message are required.' });
+  console.log('[EMAIL]', requestId, 'request received', {
+    actorRole: req.user?.role,
+    patientId: patientId || null,
+    hasEmail: Boolean(requestedEmail),
+    hasSubject: Boolean(cleanSubject),
+    htmlLength: typeof htmlMessage === 'string' ? htmlMessage.length : 0
+  });
+
+  if ((!patientId && !requestedEmail) || !cleanSubject || typeof htmlMessage !== 'string' || !htmlMessage.trim()) {
+    return res.status(400).json({ success: false, error: 'Patient ID or email, subject and HTML message are required.', requestId });
   }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
-    return res.status(400).json({ success: false, error: 'A valid recipient email is required.' });
+  if (requestedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(requestedEmail)) {
+    return res.status(400).json({ success: false, error: 'A valid recipient email is required.', requestId });
   }
-  if (String(htmlMessage).length > 100000) {
-    return res.status(413).json({ success: false, error: 'Email message is too large.' });
+  if (htmlMessage.length > 100000) {
+    return res.status(413).json({ success: false, error: 'Email message is too large.', requestId });
   }
 
+  let patient = null;
+  let dispatchLogId = null;
   try {
-    const role = String(req.user?.role || '').toLowerCase();
-    const patientResult = await db.query(
-      'SELECT id, name, email FROM patients WHERE LOWER(email) = $1 LIMIT 1',
-      [recipient]
-    );
-    if (patientResult.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'No registered patient is associated with this email address.' });
+    // Resolve recipient from Neon, not from an untrusted browser-supplied email alone.
+    const patientResult = patientId
+      ? await db.query('SELECT id, name, email FROM patients WHERE id = $1 LIMIT 1', [String(patientId)])
+      : await db.query('SELECT id, name, email FROM patients WHERE LOWER(email) = $1 LIMIT 1', [requestedEmail]);
+
+    patient = patientResult.rows[0] || null;
+    if (!patient || !patient.email) {
+      console.error('[EMAIL]', requestId, 'patient/email lookup failed', { patientId: patientId || null });
+      return res.status(404).json({ success: false, error: 'No registered patient email was found for this notification.', requestId });
     }
 
+    const recipient = String(patient.email).trim().toLowerCase();
+    if (requestedEmail && requestedEmail !== recipient) {
+      return res.status(409).json({ success: false, error: 'The supplied email does not match the registered patient email.', requestId });
+    }
+
+    const role = String(req.user?.role || '').toLowerCase();
     if (role === 'patient') {
       const tokenPatientId = req.user?.id ? String(req.user.id) : '';
       const tokenEmail = String(req.user?.email || '').trim().toLowerCase();
       const authenticatedPatient = tokenPatientId
         ? await db.query('SELECT id, email FROM patients WHERE id = $1 LIMIT 1', [tokenPatientId])
         : await db.query('SELECT id, email FROM patients WHERE LOWER(email) = $1 LIMIT 1', [tokenEmail]);
-
-      if (
-        authenticatedPatient.rowCount === 0 ||
-        String(authenticatedPatient.rows[0].email || '').trim().toLowerCase() !== recipient ||
-        tokenEmail !== recipient ||
-        (tokenPatientId && String(authenticatedPatient.rows[0].id) !== tokenPatientId)
-      ) {
-        return res.status(403).json({ success: false, error: 'Patient accounts can only send notifications to their own registered email.' });
+      const ownPatient = authenticatedPatient.rows[0];
+      if (!ownPatient || String(ownPatient.email || '').trim().toLowerCase() !== recipient ||
+          (tokenPatientId && String(ownPatient.id) !== tokenPatientId) || (tokenEmail && tokenEmail !== recipient)) {
+        return res.status(403).json({ success: false, error: 'Patient accounts can only send notifications to their own registered email.', requestId });
       }
     } else if (!req.user?.id) {
-      return res.status(403).json({ success: false, error: 'A valid staff account is required.' });
+      return res.status(403).json({ success: false, error: 'A valid staff account is required.', requestId });
     }
 
     const requiredEnv = ['CLIENT_ID', 'CLIENT_SECRET', 'REFRESH_TOKEN', 'EMAIL_USER'];
     const missingEnv = requiredEnv.filter(key => !process.env[key]);
     if (missingEnv.length) {
-      console.error('Email configuration missing:', missingEnv.join(', '));
-      return res.status(503).json({ success: false, error: 'Email service is not configured on the server.' });
+      console.error('[EMAIL]', requestId, 'missing Render environment variables:', missingEnv);
+      return res.status(503).json({ success: false, error: 'Email service is not configured on the server.', requestId });
     }
 
+    // Dispatch history is best-effort so a missing optional log table never blocks mail.
+    try {
+      const logResult = await db.query(
+        `INSERT INTO email_dispatch_logs (patient_id, recipient_email, subject, notification_type, status)
+         VALUES ($1, $2, $3, $4, 'PENDING') RETURNING id`,
+        [patient.id, recipient, cleanSubject, cleanSubject.toLowerCase().includes('payment') ? 'PAYMENT' : 'GENERAL']
+      );
+      dispatchLogId = logResult.rows[0]?.id || null;
+    } catch (logError) {
+      console.error('[EMAIL]', requestId, 'dispatch-log insert failed (mail will continue):', logError.message);
+    }
+
+    console.log('[EMAIL]', requestId, 'refreshing Google OAuth access token');
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -313,20 +348,27 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
         grant_type: 'refresh_token'
       })
     });
-    const tokenData = await tokenResponse.json().catch(() => ({}));
+    const tokenText = await tokenResponse.text();
+    let tokenData = {};
+    try { tokenData = tokenText ? JSON.parse(tokenText) : {}; } catch { /* handled below */ }
     if (!tokenResponse.ok || !tokenData.access_token) {
-      console.error('Google OAuth refresh failed:', tokenResponse.status, tokenData.error || 'No access token');
-      return res.status(502).json({ success: false, error: 'Google authentication failed. Check the Gmail OAuth refresh token and permissions.' });
+      const oauthMessage = tokenData.error_description || tokenData.error || `HTTP ${tokenResponse.status}`;
+      console.error('[EMAIL]', requestId, 'Google OAuth refresh failed:', oauthMessage);
+      if (dispatchLogId) await db.query(
+        `UPDATE email_dispatch_logs SET status = 'FAILED', error_message = $1 WHERE id = $2`,
+        [String(oauthMessage).slice(0, 2000), dispatchLogId]
+      ).catch(err => console.error('[EMAIL]', requestId, 'failed to update dispatch log:', err.message));
+      return res.status(502).json({ success: false, error: 'Google authentication failed. Verify OAuth credentials and Gmail API permissions.', requestId });
     }
+    console.log('[EMAIL]', requestId, 'OAuth access token refreshed');
 
-    const senderEmail = String(process.env.EMAIL_USER || '').trim();
+    const senderEmail = String(process.env.EMAIL_USER).trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(senderEmail)) {
-      console.error('Email configuration invalid: EMAIL_USER');
-      return res.status(503).json({ success: false, error: 'Email service is not configured correctly on the server.' });
+      console.error('[EMAIL]', requestId, 'EMAIL_USER is invalid');
+      return res.status(503).json({ success: false, error: 'Email sender configuration is invalid.', requestId });
     }
 
     const encodedSubject = `=?UTF-8?B?${Buffer.from(cleanSubject, 'utf8').toString('base64')}?=`;
-    const safeHtml = String(htmlMessage);
     const mimeMessage = [
       `To: ${recipient}`,
       `From: "CarePoint HMS" <${senderEmail}>`,
@@ -335,15 +377,19 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
       'Content-Type: text/html; charset=utf-8',
       'Content-Transfer-Encoding: 8bit',
       '',
-      safeHtml
+      htmlMessage
     ].join('\r\n');
 
-    const raw = Buffer.from(mimeMessage, 'utf8')
-      .toString('base64')
+    // Gmail API raw messages require URL-safe base64 without '=' padding.
+    const raw = Buffer.from(mimeMessage, 'utf8').toString('base64')
       .replace(/\+/g, '-')
       .replace(/\//g, '_')
-      .replace(/=+$/, '');
+      .replace(/=+$/g, '');
+    if (!raw || /[+/=\s]/.test(raw)) {
+      throw new Error('Gmail MIME raw payload failed base64url validation.');
+    }
 
+    console.log('[EMAIL]', requestId, 'calling Gmail messages.send', { recipient, rawLength: raw.length });
     const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: {
@@ -352,21 +398,42 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
       },
       body: JSON.stringify({ raw })
     });
-    const sendData = await sendResponse.json().catch(() => ({}));
-    if (!sendResponse.ok) {
-      console.error('Gmail API send failed:', sendResponse.status, sendData.error?.message || 'Unknown Gmail API error');
-      return res.status(502).json({ success: false, error: 'Gmail could not send the notification.', details: sendData.error?.message || undefined });
+    const sendText = await sendResponse.text();
+    let sendData = {};
+    try { sendData = sendText ? JSON.parse(sendText) : {}; } catch { sendData = { message: sendText }; }
+
+    if (!sendResponse.ok || !sendData.id) {
+      const gmailMessage = sendData.error?.message || sendData.message || `HTTP ${sendResponse.status}`;
+      console.error('[EMAIL]', requestId, 'Gmail API rejected message:', {
+        status: sendResponse.status,
+        statusText: sendResponse.statusText,
+        error: gmailMessage
+      });
+      if (dispatchLogId) await db.query(
+        `UPDATE email_dispatch_logs SET status = 'FAILED', error_message = $1 WHERE id = $2`,
+        [String(gmailMessage).slice(0, 2000), dispatchLogId]
+      ).catch(err => console.error('[EMAIL]', requestId, 'failed to update dispatch log:', err.message));
+      return res.status(502).json({ success: false, error: 'Gmail could not send the notification.', details: gmailMessage, requestId });
     }
 
-    console.log('CarePoint email dispatched:', {
-      patientId: patientResult.rows[0].id,
-      messageId: sendData.id || null,
-      type: role
+    if (dispatchLogId) await db.query(
+      `UPDATE email_dispatch_logs SET status = 'SENT', gmail_message_id = $1, sent_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [sendData.id, dispatchLogId]
+    ).catch(err => console.error('[EMAIL]', requestId, 'sent but dispatch-log update failed:', err.message));
+
+    console.log('[EMAIL]', requestId, 'Gmail accepted message', {
+      patientId: patient.id,
+      messageId: sendData.id,
+      threadId: sendData.threadId || null
     });
-    return res.json({ success: true, message: 'Notification email dispatched.', messageId: sendData.id || null });
+    return res.json({ success: true, message: 'Notification email dispatched.', messageId: sendData.id, requestId });
   } catch (error) {
-    console.error('Email dispatch error:', error.message);
-    return res.status(500).json({ success: false, error: 'Failed to dispatch notification email.' });
+    console.error('[EMAIL]', requestId, 'dispatch exception:', error.stack || error.message || error);
+    if (dispatchLogId) await db.query(
+      `UPDATE email_dispatch_logs SET status = 'FAILED', error_message = $1 WHERE id = $2`,
+      [String(error.message || error).slice(0, 2000), dispatchLogId]
+    ).catch(err => console.error('[EMAIL]', requestId, 'failed to update dispatch log:', err.message));
+    return res.status(500).json({ success: false, error: 'Failed to dispatch notification email.', requestId });
   }
 });
 
@@ -527,6 +594,7 @@ app.post('/api/lab-orders', verifyToken, async (req, res) => {
     const result = await db.query(query, [id, patientId, testName, status || 'PENDING']);
     res.json(result.rows[0]);
   } catch (err) {
+    console.error('Lab order save error:', err);
     res.status(500).json({ error: 'Failed to save lab order' });
   }
 });
@@ -566,6 +634,7 @@ app.post('/api/prescriptions', verifyToken, async (req, res) => {
     const result = await db.query(query, [id, patientId, patientName, diagnosis, JSON.stringify(medications), totalCost || 0, status || 'PENDING']);
     res.json(result.rows[0]);
   } catch (err) {
+    console.error('Prescription save error:', err);
     res.status(500).json({ error: 'Failed to save prescription' });
   }
 });
@@ -652,7 +721,7 @@ app.post('/api/invoices', verifyToken, async (req, res) => {
     // Safely assign the date in JavaScript to guarantee it formats correctly
     const safeDate = date || new Date().toISOString().split('T')[0];
     
-    const result = await db.query(query, [id, patientId, patientName, services, subtotal, gstAmount || 0, totalAmount, status || 'PENDING', safeDate]);
+    const result = await db.query(query, [id, patientId, patientName, services || 'Medical Services', subtotal, gstAmount || 0, totalAmount, status || 'PENDING', safeDate]);
     res.json(result.rows[0]);
   } catch (err) {
     console.error("Invoice save error:", err);
@@ -665,6 +734,7 @@ app.put('/api/invoices/:id', verifyToken, async (req, res) => {
     const result = await db.query('UPDATE invoices SET status = $1 WHERE id = $2 RETURNING *', [status, req.params.id]);
     res.json(result.rows[0]);
   } catch (err) {
+    console.error('Invoice update error:', err);
     res.status(500).json({ error: 'Invoice update failed' });
   }
 });
@@ -693,13 +763,15 @@ app.post('/api/notifications', verifyToken, async (req, res) => {
 // ==========================================
 // AI CHATBOT ENDPOINT (GROQ GPT-OSS-20B)
 // ==========================================
-const groq = new OpenAI({
-  apiKey: process.env.GROQ_API_KEY,
-  baseURL: "https://api.groq.com/openai/v1",
-});
-
 app.post('/api/chat', async (req, res) => {
   try {
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(503).json({ error: 'AI service is not configured.' });
+    }
+    const groq = new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1",
+    });
     const { message, context, userRole } = req.body;
     const systemPrompt = `You are a helpful hospital AI assistant for CarePoint HMS. User role: ${userRole}. Data: ${JSON.stringify(context)}.`;
 
