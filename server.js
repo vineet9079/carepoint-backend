@@ -262,14 +262,29 @@ const verifyToken = async (req, res, next) => {
 app.post('/api/notify/email', verifyToken, async (req, res) => {
   const requestId = `mail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const { patientId, email, subject, htmlMessage } = req.body || {};
+  const allowedNotificationTypes = new Set(['ORDER', 'DUE', 'INVOICE', 'PAYMENT', 'REPORT', 'GENERAL']);
+  const suppliedNotificationType = String(req.body?.notificationType || '').trim().toUpperCase();
+  const inferredNotificationType =
+    /payment due/i.test(String(subject || '')) ? 'DUE' :
+    /payment confirmation/i.test(String(subject || '')) ? 'PAYMENT' :
+    /invoice generated/i.test(String(subject || '')) ? 'INVOICE' :
+    /medical order received/i.test(String(subject || '')) ? 'ORDER' :
+    /lab report available/i.test(String(subject || '')) ? 'REPORT' : 'GENERAL';
+  const notificationType = allowedNotificationTypes.has(suppliedNotificationType)
+    ? suppliedNotificationType
+    : inferredNotificationType;
   const requestedEmail = String(email || '').trim().toLowerCase();
   const cleanSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim();
+  if (suppliedNotificationType && allowedNotificationTypes.has(suppliedNotificationType) && suppliedNotificationType !== inferredNotificationType) {
+    console.warn('[EMAIL]', requestId, 'notification type/subject mismatch', { suppliedNotificationType, inferredNotificationType, subject: cleanSubject });
+  }
 
   console.log('[EMAIL]', requestId, 'request received', {
     actorRole: req.user?.role,
     patientId: patientId || null,
     hasEmail: Boolean(requestedEmail),
-    hasSubject: Boolean(cleanSubject),
+    notificationType,
+    subject: cleanSubject,
     htmlLength: typeof htmlMessage === 'string' ? htmlMessage.length : 0
   });
 
@@ -334,11 +349,7 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
           patient.id,
           recipient,
           cleanSubject,
-          /payment due/i.test(cleanSubject) ? 'DUE' :
-          /payment confirmation/i.test(cleanSubject) ? 'PAYMENT' :
-          /invoice generated/i.test(cleanSubject) ? 'INVOICE' :
-          /medical order received/i.test(cleanSubject) ? 'ORDER' :
-          /lab report available/i.test(cleanSubject) ? 'REPORT' : 'GENERAL'
+          notificationType
         ]
       );
       dispatchLogId = logResult.rows[0]?.id || null;
@@ -398,7 +409,7 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
       throw new Error('Gmail MIME raw payload failed base64url validation.');
     }
 
-    console.log('[EMAIL]', requestId, 'calling Gmail messages.send', { recipient, rawLength: raw.length });
+    console.log('[EMAIL]', requestId, 'calling Gmail messages.send', { notificationType, subject: cleanSubject, recipient, rawLength: raw.length });
     const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: {
@@ -432,10 +443,12 @@ app.post('/api/notify/email', verifyToken, async (req, res) => {
 
     console.log('[EMAIL]', requestId, 'Gmail accepted message', {
       patientId: patient.id,
+      notificationType,
+      subject: cleanSubject,
       messageId: sendData.id,
       threadId: sendData.threadId || null
     });
-    return res.json({ success: true, message: 'Notification email dispatched.', messageId: sendData.id, requestId });
+    return res.json({ success: true, message: 'Notification email dispatched.', notificationType, subject: cleanSubject, messageId: sendData.id, requestId });
   } catch (error) {
     console.error('[EMAIL]', requestId, 'dispatch exception:', error.stack || error.message || error);
     if (dispatchLogId) await db.query(
