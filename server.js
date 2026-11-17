@@ -201,12 +201,30 @@ app.post('/api/auth/send-otp', async (req, res) => {
       </div>
     `;
 
-    const base64EncodedEmail = buildGmailRawMessage({
-      to: email,
-      from: process.env.EMAIL_USER,
-      subject: 'CarePoint HMS - Secure Login Verification Code',
-      html: otpHtml
-    });
+    // Keep OTP delivery on the simple MIME format used by the earlier working
+    // CarePoint version. The newer multipart helper remains available for
+    // general notifications, but is not needed for this one-time-code email.
+    const cleanEmail = String(email).trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ success: false, error: 'Please provide a valid email address.' });
+    }
+
+    const emailContent = [
+      `To: ${cleanEmail}`,
+      `From: "CarePoint HMS" <${process.env.EMAIL_USER}>`,
+      'Subject: CarePoint HMS - Secure Login OTP',
+      'MIME-Version: 1.0',
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      otpHtml
+    ].join('\r\n');
+
+    const base64EncodedEmail = Buffer.from(emailContent, 'utf8')
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/g, '');
 
     const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
@@ -214,7 +232,12 @@ app.post('/api/auth/send-otp', async (req, res) => {
       body: JSON.stringify({ raw: base64EncodedEmail })
     });
 
-    if (!sendResponse.ok) throw new Error(await sendResponse.text());
+    if (!sendResponse.ok) {
+      const gmailError = await sendResponse.text();
+      console.error('[OTP EMAIL] Gmail API rejected message:', sendResponse.status, gmailError);
+      throw new Error(`Gmail API HTTP ${sendResponse.status}`);
+    }
+    console.log('[OTP EMAIL] Gmail accepted OTP message for delivery.');
     res.json({ success: true, message: 'OTP dispatched securely via Gmail HTTPS API.' });
   } catch (error) {
     console.error('[OTP EMAIL] Dispatch failed:', error.message);
