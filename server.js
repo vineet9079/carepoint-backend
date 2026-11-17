@@ -178,10 +178,25 @@ app.post('/api/auth/send-otp', async (req, res) => {
       })
     });
 
-    const tokenData = await tokenResponse.json();
-    if (!tokenResponse.ok || !tokenData.access_token) {
-      throw new Error(tokenData.error_description || tokenData.error || 'Failed to get access token');
+    const tokenResponseText = await tokenResponse.text();
+    let tokenData = {};
+    try {
+      tokenData = tokenResponseText ? JSON.parse(tokenResponseText) : {};
+    } catch (_parseError) {
+      tokenData = { responseText: tokenResponseText.slice(0, 1000) };
     }
+    if (!tokenResponse.ok || !tokenData.access_token) {
+      // Google token errors are safe to log after excluding credentials/tokens.
+      console.error('[OTP EMAIL] Google OAuth token refresh rejected:', {
+        status: tokenResponse.status,
+        statusText: tokenResponse.statusText,
+        error: tokenData.error || null,
+        error_description: tokenData.error_description || null,
+        responseText: tokenData.responseText || null
+      });
+      throw new Error(`Google OAuth token refresh failed (HTTP ${tokenResponse.status}): ${tokenData.error_description || tokenData.error || 'No access token returned'}`);
+    }
+    console.log('[OTP EMAIL] Google OAuth access token refreshed successfully.');
 
     const safeOtp = String(otp).replace(/[&<>"']/g, char => ({
       '&': '&amp;',
@@ -233,9 +248,17 @@ app.post('/api/auth/send-otp', async (req, res) => {
     });
 
     if (!sendResponse.ok) {
-      const gmailError = await sendResponse.text();
-      console.error('[OTP EMAIL] Gmail API rejected message:', sendResponse.status, gmailError);
-      throw new Error(`Gmail API HTTP ${sendResponse.status}`);
+      const gmailErrorText = await sendResponse.text();
+      let gmailErrorData;
+      try { gmailErrorData = JSON.parse(gmailErrorText); }
+      catch (_parseError) { gmailErrorData = { responseText: gmailErrorText.slice(0, 1500) }; }
+      console.error('[OTP EMAIL] Gmail API rejected message:', {
+        status: sendResponse.status,
+        statusText: sendResponse.statusText,
+        error: gmailErrorData.error || null,
+        responseText: gmailErrorData.responseText || null
+      });
+      throw new Error(`Gmail API rejected message (HTTP ${sendResponse.status}): ${gmailErrorData.error?.message || gmailErrorData.error?.status || 'See preceding Gmail API log'}`);
     }
     console.log('[OTP EMAIL] Gmail accepted OTP message for delivery.');
     res.json({ success: true, message: 'OTP dispatched securely via Gmail HTTPS API.' });
